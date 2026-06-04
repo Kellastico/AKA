@@ -1,0 +1,28 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+
+# Tauri / Rust build output — `target/` matches every crate, including the
+# nested sidecar at src-tauri/aka-runtime/target.
+target/
+src-tauri/gen
+
+# Generated build info
+*.tsbuildinfo
+vite.config.d.ts
+
+# OS / editor cruft
+.idea
+Thumbs.db
+
+# AKA per-project local config (machine-specific; may hold endpoints/keys)
+.äkä/
+
+# Local tool & runtime state — never ship in a public repo
+.aider*
+.memory/
+.claude/

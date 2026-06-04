@@ -1,0 +1,241 @@
+@import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Averia+Serif+Libre:ital,wght@0,300;0,400;0,700;1,300;1,400;1,700&display=swap");
+
+@theme {
+  --color-shell: #f3f3f2;
+  --color-pill: #e6e5e3;
+  --color-pill-stroke: #111111;
+  --color-panel: #dcdbd8;
+  --color-ink: #ffffff;
+  /* Averia Serif Libre — looser, hand-drawn serif used only for hero/intro
+     display copy. Picked over Fraunces because its wider letter spacing reads
+     better at large sizes against AKA's dark purple gradient. Never use for
+     headers or body. */
+  --font-display: "Averia Serif Libre", ui-serif, Georgia, serif;
+  /* Space Mono is the chat body font — keeps the agentic-coder feel. */
+  --font-mono: "Space Mono", "Roboto Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: radial-gradient(ellipse 80% 60% at 50% 100%, #26003f, #13001f);
+  color: var(--color-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes pane-enter {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes morph-in {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes morph-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes slide-down-in {
+  from {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-down-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+}
+
+@keyframes slide-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-up-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+
+@keyframes reveal-down-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes reveal-down-out {
+  from {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+  to {
+    opacity: 0;
+    clip-path: inset(0 0 100% 0);
+  }
+}
+
+@keyframes reveal-up-in {
+  from {
+    opacity: 0;
+    clip-path: inset(100% 0 0 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* Omnibox refresh — fires when the user opens a new session or project.
+   Slides in from ~4px above with a subtle fade so the context switch feels
+   acknowledged without distracting from the main content. */
+@keyframes omnibox-flash {
+  0%   { opacity: 0.55; transform: translateY(-4px) scale(0.994); }
+  65%  { opacity: 1;    transform: translateY(1px)  scale(1.002); }
+  100% { opacity: 1;    transform: translateY(0)    scale(1);     }
+}
+
+/* Bottom-sheet animations — travel the full sheet height, not 24px. The
+   opposite-direction counterpart to the searchbox dropdown (slide-down-in).
+   Used by AskUserSheet. */
+@keyframes sheet-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sheet-up-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+}
+
+@keyframes reveal-up-out {
+  from {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+  }
+  to {
+    opacity: 0;
+    clip-path: inset(100% 0 0 0);
+  }
+}
+
+/* Reasoning "working" pulse — loops on the Brain icon while the model is
+   still streaming its reasoning and the accordion is collapsed, so a glance
+   at the icon tells you the model is busy. Scale + opacity so it reads even
+   at 12px. */
+@keyframes icon-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.88); }
+  50%      { opacity: 1;   transform: scale(1.12); }
+}
+
+/* Toast notifications — slide DOWN from above the top edge on enter, and
+   retract back up on dismiss. Spring-y enter, quick exit. */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-140%) scale(0.96); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-140%) scale(0.96); }
+}
+
+@theme {
+  --animate-icon-pulse: icon-pulse 1.4s ease-in-out infinite;
+  --animate-toast-in: toast-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-toast-out: toast-out 0.2s cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-morph-in: morph-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-morph-out: morph-out 0.15s ease-in forwards;
+  --animate-message-in: message-in 0.65s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-slide-down-in: slide-down-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-slide-down-out: slide-down-out 0.15s ease-in forwards;
+  --animate-slide-up-in: slide-up-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-slide-up-out: slide-up-out 0.15s ease-in forwards;
+  --animate-reveal-down-in: reveal-down-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-reveal-down-out: reveal-down-out 0.16s ease-in forwards;
+  --animate-reveal-up-in: reveal-up-in 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-reveal-up-out: reveal-up-out 0.16s ease-in forwards;
+  --animate-sheet-up-in: sheet-up-in 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-sheet-up-out: sheet-up-out 0.2s ease-in forwards;
+  --animate-omnibox-flash: omnibox-flash 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
