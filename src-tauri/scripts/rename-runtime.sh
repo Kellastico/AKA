@@ -30,7 +30,14 @@ else
   SRC="$RUNTIME_DIR/target/release/aka-runtime"
 fi
 
-( cd "$RUNTIME_DIR" && cargo build --release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} )
+# Scrub the builder's absolute paths (home, .cargo registry, workspace) from the
+# emitted binary so panic locations / embedded `file!()` strings don't leak who
+# compiled it. `$HOME` is resolved per-builder at build time, so this stays
+# portable — every contributor's binary is scrubbed without machine-specific
+# config. (Cargo's `trim-paths` profile option is still unstable here, so we use
+# the stable RUSTFLAGS form.)
+REMAP_RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home/builder"
+( cd "$RUNTIME_DIR" && RUSTFLAGS="$REMAP_RUSTFLAGS" cargo build --release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} )
 
 EXT=""
 case "$TRIPLE" in

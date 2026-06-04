@@ -24,12 +24,12 @@ export function WelcomeStep() {
         <Pillar
           icon={<Cube size={18} weight="duotone" />}
           title="Bring your LLM"
-          body="Ollama, LM Studio, MLX, or any OpenAI-compatible endpoint."
+          body="Any OpenAI-compatible endpoint — local or remote."
         />
         <Pillar
           icon={<Robot size={18} weight="duotone" />}
           title="Bring your agent"
-          body="Aider, OpenCode, Claude Code — whatever you already use."
+          body="Any coding agent — whatever you already use."
         />
         <Pillar
           icon={<Lock size={18} weight="duotone" />}

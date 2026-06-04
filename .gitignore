@@ -26,3 +26,9 @@ Thumbs.db
 .aider*
 .memory/
 .claude/
+
+# Internal docs kept out of the public repo (still present locally)
+/References.md
+/AKA-Sidecar-Stress-Test-Report.md
+/AKA-Sidecar-Stress-Test-Report.pdf
+/aka-product-page-content.md

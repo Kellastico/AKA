@@ -16,7 +16,7 @@ Error: Port 5174 is already in use
 `.trim();
 
 const NEXT_ORPHAN_STDERR = `
-> readybadgego@0.1.0 dev
+> myapp@0.1.0 dev
 > next dev
 
 ⚠ Port 3000 is in use by process 73931, using available port 3001 instead.
@@ -28,7 +28,7 @@ x Another next dev server is already running.
 
 - Local: http://localhost:3000
 - PID: 73931
-- Dir: /Users/kellyikemenogo/Documents/readybadgego-main
+- Dir: /Users/dev/projects/myapp
 - Log: .next/dev/logs/next-development.log
 
 Run kill 73931 to stop it.

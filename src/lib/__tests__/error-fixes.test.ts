@@ -6,7 +6,7 @@ x Another next dev server is already running.
 
 - Local: http://localhost:3000
 - PID: 73931
-- Dir: /Users/kellyikemenogo/Documents/readybadgego-main
+- Dir: /Users/dev/projects/myapp
 - Log: .next/dev/logs/next-development.log
 
 Run kill 73931 to stop it.
