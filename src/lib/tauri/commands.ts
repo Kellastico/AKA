@@ -268,6 +268,18 @@ export async function runAgent(
   modelOverride?: string,
   baseUrlOverride?: string,
   apiKeyOverride?: string | null,
+  /**
+   * Absolute paths of image attachments pinned to this task. AKA can't inject
+   * them into the agent's own model call (the agent is a separate process that
+   * makes its own LLM calls), so it hands the agent the files via the
+   * `AKA_IMAGE_PATHS` env var. Omit when the task has no images.
+   */
+  imagePaths?: string[],
+  /**
+   * All attachments for this task, surfaced to the agent as `AKA_ATTACHMENTS`
+   * (a JSON array of `{ name, kind, path }`). Omit when there are none.
+   */
+  attachments?: { name: string; kind: string; path?: string }[],
 ): Promise<void> {
   return invoke("run_agent", {
     task,
@@ -276,6 +288,8 @@ export async function runAgent(
     modelOverride: modelOverride ?? null,
     baseUrlOverride: baseUrlOverride ?? null,
     apiKeyOverride: apiKeyOverride ?? null,
+    imagePaths: imagePaths ?? null,
+    attachments: attachments ?? null,
   });
 }
 

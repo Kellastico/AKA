@@ -19,6 +19,8 @@ export const WRAPPER_ENV = [
   ["AKA_TASK", "the task prompt"],
   ["AKA_TASK_FILE", "a file containing the task prompt"],
   ["AKA_PROJECT_DIR", "the project root (also the working directory)"],
+  ["AKA_IMAGE_PATHS", "newline-separated absolute paths of attached images (if any)"],
+  ["AKA_ATTACHMENTS", "JSON array of { name, kind, path } for all attachments (if any)"],
 ] as const;
 
 const SH_STUB = `#!/usr/bin/env sh
@@ -30,6 +32,8 @@ const SH_STUB = `#!/usr/bin/env sh
 #   AKA_TASK         the task prompt
 #   AKA_TASK_FILE    a file containing the task prompt
 #   AKA_PROJECT_DIR  the project root (also the working directory)
+#   AKA_IMAGE_PATHS  newline-separated absolute paths of attached images (if any)
+#   AKA_ATTACHMENTS  JSON array of { name, kind, path } for all attachments (if any)
 #
 # Replace the line below with the command that launches your agent. Stream
 # human-readable output to stdout; exit 0 on success, non-zero on failure.
@@ -43,6 +47,8 @@ const PY_STUB = `#!/usr/bin/env python3
 AKA runs this in your project directory and provides these env vars:
   AKA_MODEL, AKA_BASE_URL, AKA_API_KEY, AKA_TASK, AKA_TASK_FILE, AKA_PROJECT_DIR
   (AKA_BASE_URL / AKA_API_KEY are also exported as OPENAI_BASE_URL / OPENAI_API_KEY)
+  AKA_IMAGE_PATHS  newline-separated absolute paths of attached images (if any)
+  AKA_ATTACHMENTS  JSON array of { name, kind, path } for all attachments (if any)
 
 Stream human-readable output to stdout; exit 0 on success, non-zero on failure.
 """

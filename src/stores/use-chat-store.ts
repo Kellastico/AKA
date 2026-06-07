@@ -135,11 +135,17 @@ async function materializeAttachments(items: Attachment[]): Promise<string> {
     } else if (item.kind === "url" && item.url) {
       sections.push(`### URL: ${item.url}`);
     } else if (item.kind === "image") {
-      // Just a textual anchor — the actual bytes travel as an `image_url`
-      // content part built by the history builder. Image attachment is gated
-      // to vision-capable models (see AttachButton), so this is never the only
-      // thing the model receives.
-      sections.push(`### Image: ${item.name}`);
+      // Textual anchor. For Ask/Strategize the actual bytes travel as an
+      // `image_url` content part built by the history builder (image attachment
+      // is gated to vision-capable models, see AttachButton). For Execute mode
+      // the spawned agent makes its own model call, so we also surface the
+      // absolute path here — an agent that only reads AKA_TASK can still locate
+      // and load the file itself.
+      sections.push(
+        item.path
+          ? `### Image: ${item.name}\nPath: ${item.path}`
+          : `### Image: ${item.name}`,
+      );
     }
   }
 
@@ -898,6 +904,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // model is honoured even if its config write is still in flight.
           {
             const { selectedModelId, active } = useRuntimeStore.getState();
+            // Hand the agent the attached files it can read on its own. AKA
+            // can't inject images into the agent's model call (it's a separate
+            // process), so it exposes the image paths + full attachment list via
+            // env (AKA_IMAGE_PATHS / AKA_ATTACHMENTS). Both empty → no-op.
+            const imagePaths = attachments
+              .filter((a) => a.kind === "image" && a.path)
+              .map((a) => a.path as string);
+            const attachmentMeta = attachments.map((a) => ({
+              name: a.name,
+              kind: a.kind,
+              path: a.path,
+            }));
             await runAgent(
               task,
               projectPath,
@@ -905,6 +923,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               selectedModelId ?? undefined,
               active?.baseUrl ?? undefined,
               active?.apiKey ?? null,
+              imagePaths,
+              attachmentMeta,
             );
           }
           if (genOf(runKey) !== myGen) {

@@ -26,7 +26,12 @@ reversible.
   block to every agent identically: `AKA_MODEL`, `AKA_BASE_URL`, `AKA_API_KEY`,
   `AKA_PROJECT_DIR`, `AKA_TASK`, `AKA_TASK_FILE` (a temp file holding the
   prompt), plus the de-facto `OPENAI_BASE_URL` / `OPENAI_API_BASE` /
-  `OPENAI_API_KEY`. An env-aware agent or a thin wrapper script can read these
+  `OPENAI_API_KEY`. When the task carries image/file attachments it also exports
+  `AKA_IMAGE_PATHS` (newline-separated absolute image paths) and `AKA_ATTACHMENTS`
+  (a JSON array of `{ name, kind, path }` for all attachments) — AKA can't inject
+  images into a spawned agent's own model call, so it hands the agent the files
+  instead; both are omitted when there are no attachments. An env-aware agent or
+  a thin wrapper script can read these
   instead of using argv placeholders — this is the "plug-and-play any agent"
   path (`src/lib/agent-wrapper.ts` generates starter wrappers).
 - **Prompt delivery.** The prompt reaches the agent ONLY via the `{task}`

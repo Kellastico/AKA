@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
@@ -32,6 +32,21 @@ pub struct DetectedAgent {
     pub bin: String,
     pub installed: bool,
     pub version: Option<String>,
+}
+
+/// One attachment the user pinned to the task, as handed from the frontend.
+/// Threaded into the spawned agent's env (`AKA_ATTACHMENTS`) so a vision- or
+/// file-aware agent can locate the files AKA can't inject into the agent's own
+/// model call. Round-trips verbatim — AKA never inspects which kind it is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentMeta {
+    pub name: String,
+    /// "file" | "folder" | "image" | "url".
+    pub kind: String,
+    /// Absolute filesystem path (file/folder/image); absent for URLs.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,6 +312,13 @@ pub async fn run_agent(
     model_override: Option<String>,
     base_url_override: Option<String>,
     api_key_override: Option<String>,
+    // Image attachments pinned to this task, by absolute path. AKA can't inject
+    // them into the agent's own model call (the agent is a separate process that
+    // makes its own LLM calls), so it hands the FILES to the agent instead.
+    image_paths: Option<Vec<String>>,
+    // All attachments for this task ({ name, kind, path }), so an agent that
+    // wants richer context than the image paths alone can find them.
+    attachments: Option<Vec<AttachmentMeta>>,
 ) -> Result<(), AppError> {
     if project_path.trim().is_empty() {
         return Err(AppError::sandbox(project_path.clone()));
@@ -364,6 +386,25 @@ pub async fn run_agent(
     env.insert("AKA_TASK".into(), task.clone());
     if task_file_ok {
         env.insert("AKA_TASK_FILE".into(), task_file.to_string_lossy().into_owned());
+    }
+    // Attachment contract — give vision/file-aware agents the files AKA can't
+    // inject into their own model call:
+    //   AKA_IMAGE_PATHS  newline-separated absolute paths of attached images
+    //   AKA_ATTACHMENTS  JSON array of { name, kind, path } for ALL attachments
+    // Both are omitted when the task has none, so attachment-free runs are
+    // byte-for-byte unchanged and agents that ignore them keep working.
+    if let Some(paths) = image_paths {
+        let paths: Vec<String> = paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+        if !paths.is_empty() {
+            env.insert("AKA_IMAGE_PATHS".into(), paths.join("\n"));
+        }
+    }
+    if let Some(attachments) = attachments {
+        if !attachments.is_empty() {
+            if let Ok(json) = serde_json::to_string(&attachments) {
+                env.insert("AKA_ATTACHMENTS".into(), json);
+            }
+        }
     }
     env.insert("OPENAI_BASE_URL".into(), cfg.runtime.base_url.clone());
     env.insert("OPENAI_API_BASE".into(), cfg.runtime.base_url.clone());
