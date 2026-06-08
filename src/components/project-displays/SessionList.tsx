@@ -21,6 +21,7 @@ import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-stor
 import { adviceForNewSession } from "../../lib/session-concurrency";
 import { SameModelAdviceModal } from "../SameModelAdviceModal";
 import { usePrefsStore } from "../../stores/use-prefs-store";
+import { useProjectDeletion } from "./use-project-deletion";
 import { Tooltip } from "../Tooltip";
 
 export function SessionList({
@@ -356,11 +357,36 @@ function DeleteConfirm({
   );
 }
 
-export function ProjectHeader({ project }: { project: Project }) {
+export function ProjectHeader({
+  project,
+  onClose,
+}: {
+  project: Project;
+  /** Closes the surrounding sheet once the project is deleted. */
+  onClose: () => void;
+}) {
+  const { requestDelete, modal } = useProjectDeletion(project, onClose);
   return (
-    <div className="px-3 pt-2 pb-1">
-      <div className="text-xs font-medium text-ink/60">{project.name}</div>
-      <div className="truncate text-[11px] text-ink/40">{project.path}</div>
+    // `group` so the trash button only reveals on hover — same affordance the
+    // session rows use, keeping the destructive action out of reach until the
+    // user deliberately hovers the project.
+    <div className="group flex min-w-0 items-start gap-2 px-3 pt-2 pb-1">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium text-ink/60">
+          {project.name}
+        </div>
+        <div className="truncate text-[11px] text-ink/40">{project.path}</div>
+      </div>
+      <Tooltip label="Delete project">
+        <button
+          onClick={requestDelete}
+          aria-label="Delete project"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink/45 opacity-0 transition-opacity hover:bg-rose-500/15 hover:text-rose-500 group-hover:opacity-100"
+        >
+          <Trash size={13} />
+        </button>
+      </Tooltip>
+      {modal}
     </div>
   );
 }

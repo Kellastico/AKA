@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Lightbulb, X } from "@phosphor-icons/react";
 
 /**
@@ -45,7 +46,12 @@ export function SameModelAdviceModal({
 
   if (!open) return null;
 
-  return (
+  // Portaled to <body> so it covers the true viewport. Without this, the modal
+  // renders inside whatever opened it (e.g. the project Popover, which uses a
+  // CSS transform) — and a `position: fixed` element is captured by a
+  // transformed ancestor, leaving the modal clipped to that box (the
+  // bottom-left cropped warning bug).
+  return createPortal(
     <div
       data-testid="same-model-advice"
       role="dialog"
@@ -120,6 +126,7 @@ export function SameModelAdviceModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

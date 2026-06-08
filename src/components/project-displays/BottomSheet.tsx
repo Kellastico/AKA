@@ -30,7 +30,7 @@ export function BottomSheet({
     >
       <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-ink/20" />
       <div className="flex items-start justify-between">
-        <ProjectHeader project={project} />
+        <ProjectHeader project={project} onClose={onClose} />
         <Tooltip label="Close" side="bottom">
           <button
             onClick={onClose}

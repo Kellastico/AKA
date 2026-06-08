@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Warning, X } from "@phosphor-icons/react";
 
 /**
@@ -42,7 +43,10 @@ export function ConcurrencyRamWarningModal({
   const runningLabel =
     runningModels.length > 0 ? runningModels.join(", ") : "another model";
 
-  return (
+  // Portaled to <body> so `fixed inset-0` covers the real viewport rather than
+  // being captured by a transformed ancestor (chat footer / popover), which
+  // would clip the modal into a corner.
+  return createPortal(
     <div
       data-testid="concurrency-ram-warning"
       role="dialog"
@@ -114,6 +118,7 @@ export function ConcurrencyRamWarningModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
