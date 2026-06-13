@@ -1,6 +1,6 @@
 [package]
 name = "aka"
-version = "1.0.2"
+version = "1.0.3"
 description = "AKA — local-first agentic coder desktop app"
 edition = "2021"
 
