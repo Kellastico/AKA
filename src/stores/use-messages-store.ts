@@ -127,6 +127,28 @@ type MessagesState = {
   patchMessage: (id: string, patch: Partial<Message>, sessionId?: string | null) => void;
   /** Append text to the thinkingContent of an existing message (used by streaming). */
   appendThinkingToMessage: (id: string, delta: string, sessionId?: string | null) => void;
+  /**
+   * Move the last `chars` characters of a message's content into its
+   * thinkingContent. Used when the stream parser meets an orphan </think> —
+   * the opener was prefilled by the model's chat template, so text already
+   * streamed into the body retroactively turns out to be reasoning.
+   */
+  reclaimContentAsThinking: (
+    id: string,
+    chars: number,
+    sessionId?: string | null,
+  ) => void;
+  /**
+   * Inverse of reclaimContentAsThinking: move the last `chars` characters of
+   * thinkingContent back into content. Used when a speculative thinking-first
+   * parse turns out to be wrong (stream ended cleanly with no close tag) —
+   * the text routed to the accordion was really the answer.
+   */
+  reclaimThinkingToContent: (
+    id: string,
+    chars: number,
+    sessionId?: string | null,
+  ) => void;
   /** Attach a structured error to a message — renders inline as an ErrorBanner. */
   attachErrorToMessage: (id: string, error: AppError, sessionId?: string | null) => void;
   /**
@@ -398,6 +420,49 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     schedulePersist();
   },
 
+  reclaimContentAsThinking: (id, chars, sessionId) => {
+    if (chars <= 0) return;
+    set((state) =>
+      applyToSession(state, targetSession(state, sessionId), (msgs) =>
+        msgs.map((m) => {
+          if (m.id !== id) return m;
+          const cut = Math.max(0, m.content.length - chars);
+          return {
+            ...m,
+            content: m.content.slice(0, cut),
+            thinkingContent: (m.thinkingContent ?? "") + m.content.slice(cut),
+            thinkingStartedAt: m.thinkingStartedAt ?? Date.now(),
+          };
+        }),
+      ),
+    );
+    schedulePersist();
+  },
+
+  reclaimThinkingToContent: (id, chars, sessionId) => {
+    if (chars <= 0) return;
+    set((state) =>
+      applyToSession(state, targetSession(state, sessionId), (msgs) =>
+        msgs.map((m) => {
+          if (m.id !== id) return m;
+          const thinking = m.thinkingContent ?? "";
+          const cut = Math.max(0, thinking.length - chars);
+          const keep = thinking.slice(0, cut);
+          return {
+            ...m,
+            content: m.content + thinking.slice(cut),
+            thinkingContent: keep || undefined,
+            // The accordion vanishes with its content — drop the clocks too
+            // so an empty "Reasoning · 0s" row can't linger.
+            thinkingStartedAt: keep ? m.thinkingStartedAt : undefined,
+            thinkingEndedAt: keep ? m.thinkingEndedAt : undefined,
+          };
+        }),
+      ),
+    );
+    schedulePersist();
+  },
+
   attachErrorToMessage: (id, error, sessionId) => {
     set((state) =>
       applyToSession(state, targetSession(state, sessionId), (msgs) =>
@@ -421,13 +486,27 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
           const match = m.content.match(
             /^<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>\s*/i,
           );
-          if (!match) return { ...m, thinkingEndedAt };
-          return {
-            ...m,
-            thinkingContent: match[1].trim(),
-            content: m.content.slice(match[0].length).trim(),
-            thinkingEndedAt,
-          };
+          if (match) {
+            return {
+              ...m,
+              thinkingContent: match[1].trim(),
+              content: m.content.slice(match[0].length).trim(),
+              thinkingEndedAt,
+            };
+          }
+          // Orphan close tag: R1-style templates prefill the opener, so the
+          // text only ever carries </think>. Everything before the first
+          // close (with no opener in between) is reasoning.
+          const orphan = m.content.match(/^([\s\S]*?)<\/think(?:ing)?>\s*/i);
+          if (orphan && !/<think(?:ing)?>/i.test(orphan[1])) {
+            return {
+              ...m,
+              thinkingContent: orphan[1].trim(),
+              content: m.content.slice(orphan[0].length).trim(),
+              thinkingEndedAt,
+            };
+          }
+          return { ...m, thinkingEndedAt };
         }),
       ),
     );

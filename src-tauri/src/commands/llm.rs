@@ -30,6 +30,11 @@ pub struct LlmStreamState {
 struct ChunkPayload {
     run_id: String,
     text: String,
+    /// Reasoning delta for runtimes that stream thinking as its own field
+    /// (Ollama's `reasoning`, DeepSeek-style `reasoning_content`) instead of
+    /// inline <think> tags. Mutually exclusive with `text` per event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -43,6 +48,62 @@ struct DonePayload {
 struct ErrorPayload {
     run_id: String,
     message: String,
+}
+
+/// Strip model reasoning from a completed (non-streamed) response so it never
+/// leaks into machine-consumed strings (self-correction prompts, handoff
+/// summaries). Removes <think>…</think> / <thinking>…</thinking> blocks, and
+/// handles templates that prefill the opening tag — where the model only ever
+/// emits a closing tag — by treating everything before an orphan close tag as
+/// reasoning.
+fn strip_think(s: &str) -> String {
+    const OPEN_TAGS: [&str; 2] = ["<thinking>", "<think>"];
+    const CLOSE_TAGS: [&str; 2] = ["</thinking>", "</think>"];
+
+    fn find_first(s: &str, tags: &[&str]) -> Option<(usize, usize)> {
+        tags.iter()
+            .filter_map(|t| s.find(t).map(|i| (i, t.len())))
+            .min_by_key(|&(i, _)| i)
+    }
+
+    let mut out = String::new();
+    let mut rest = s;
+    let mut in_think = false;
+    loop {
+        if in_think {
+            match find_first(rest, &CLOSE_TAGS) {
+                Some((i, len)) => {
+                    rest = &rest[i + len..];
+                    in_think = false;
+                }
+                // Unterminated thinking block — drop the tail.
+                None => break,
+            }
+        } else {
+            let open = find_first(rest, &OPEN_TAGS);
+            let close = find_first(rest, &CLOSE_TAGS);
+            match (open, close) {
+                // Close tag with no opener before it: the opener lived in the
+                // prompt template, so everything up to here was reasoning.
+                (o, Some((ci, clen))) if o.is_none_or(|(oi, _)| ci < oi) => {
+                    out.clear();
+                    rest = &rest[ci + clen..];
+                }
+                (Some((oi, olen)), _) => {
+                    out.push_str(&rest[..oi]);
+                    rest = &rest[oi + olen..];
+                    in_think = true;
+                }
+                // No more tags (close-before-open is caught by the first arm,
+                // so a remaining Some(close) here is unreachable).
+                (None, _) => {
+                    out.push_str(rest);
+                    break;
+                }
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 const SUMMARIZER_SYSTEM_PROMPT: &str = "You are a session summarizer. Given a conversation history, return a concise summary covering: the original task, what was completed, what files were changed, and what remains unfinished. Be brief — 100 words maximum.";
@@ -263,6 +324,7 @@ pub async fn call_llm(
         .into_iter()
         .next()
         .and_then(|c| c.message.content)
+        .map(|s| strip_think(&s))
         .ok_or(AppError::RuntimeOffline)
 }
 
@@ -337,7 +399,7 @@ pub async fn summarize_session(
         .into_iter()
         .next()
         .and_then(|c| c.message.content)
-        .map(|s| s.trim().to_string())
+        .map(|s| strip_think(&s))
         .filter(|s| !s.is_empty())
         .ok_or(AppError::SummarizationFailed)
 }
@@ -492,13 +554,35 @@ async fn run_stream(
             let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
-            if let Some(delta) = json["choices"][0]["delta"]["content"].as_str() {
-                if !delta.is_empty() {
+            let delta = &json["choices"][0]["delta"];
+            // Runtimes with native thinking support (Ollama's `reasoning`,
+            // DeepSeek-style `reasoning_content`) stream reasoning as its own
+            // delta field rather than inline <think> tags — forward it
+            // separately so the UI routes it straight to the Reasoning
+            // accordion.
+            if let Some(thinking) = delta["reasoning"]
+                .as_str()
+                .or_else(|| delta["reasoning_content"].as_str())
+            {
+                if !thinking.is_empty() {
                     let _ = app.emit(
                         EVT_LLM_CHUNK,
                         ChunkPayload {
                             run_id: run_id.to_string(),
-                            text: delta.to_string(),
+                            text: String::new(),
+                            thinking: Some(thinking.to_string()),
+                        },
+                    );
+                }
+            }
+            if let Some(text) = delta["content"].as_str() {
+                if !text.is_empty() {
+                    let _ = app.emit(
+                        EVT_LLM_CHUNK,
+                        ChunkPayload {
+                            run_id: run_id.to_string(),
+                            text: text.to_string(),
+                            thinking: None,
                         },
                     );
                 }
@@ -533,5 +617,38 @@ pub async fn stop_llm_stream(
             }
             Ok(any)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_think;
+
+    #[test]
+    fn strips_tagged_block() {
+        assert_eq!(strip_think("<think>plan</think>answer"), "answer");
+        assert_eq!(strip_think("<thinking>plan</thinking>answer"), "answer");
+    }
+
+    #[test]
+    fn strips_orphan_close() {
+        // Template-prefilled opener: only the close tag is ever emitted.
+        assert_eq!(strip_think("reasoning here</think>\nthe summary"), "the summary");
+    }
+
+    #[test]
+    fn strips_multiple_blocks() {
+        assert_eq!(strip_think("<think>a</think>one<think>b</think> two"), "one two");
+    }
+
+    #[test]
+    fn drops_unterminated_thinking() {
+        assert_eq!(strip_think("<think>never closed"), "");
+    }
+
+    #[test]
+    fn passes_plain_text_through() {
+        assert_eq!(strip_think("  just an answer  "), "just an answer");
+        assert_eq!(strip_think("use <thead> and <div>"), "use <thead> and <div>");
     }
 }

@@ -1043,6 +1043,16 @@ export async function killPort(port: number): Promise<number> {
   return invoke<number>("kill_port", { port });
 }
 
+/**
+ * Wipe the webview's HTTP cache and browsing data. Backs the Preview pane's
+ * hard reload (⇧-click on Reload) — clears stale cached JS/CSS that a dev
+ * server without no-cache headers can otherwise keep serving to the iframe.
+ */
+export async function clearWebviewCache(): Promise<void> {
+  if (!hasTauri()) return;
+  return invoke("clear_webview_cache");
+}
+
 // ---------- Shell ----------
 
 /**

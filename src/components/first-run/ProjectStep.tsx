@@ -15,6 +15,7 @@ export function ProjectStep() {
   const activeProjectId = useProjectsStore((s) => s.activeProjectId);
   const addProject = useProjectsStore((s) => s.addProject);
   const startNewSession = useProjectsStore((s) => s.startNewSession);
+  const activateSession = useProjectsStore((s) => s.activateSession);
 
   const complete = useFirstRunStore((s) => s.complete);
 
@@ -46,9 +47,15 @@ export function ProjectStep() {
   const handleFinish = async () => {
     if (!activeProject) return;
     setBusy(true);
-    // Start a fresh session so the user lands directly in chat — no extra
-    // "click the project pill to open the sessions popover" hop.
-    await startNewSession(activeProject.id);
+    // Land the user directly in chat — no extra "click the project pill to
+    // open the sessions popover" hop. addProject already created a fresh
+    // session, so reuse it; only fall back to creating one for projects
+    // imported before that behavior existed.
+    if (activeProject.sessions.length > 0) {
+      activateSession(activeProject.id, activeProject.sessions[0].id);
+    } else {
+      await startNewSession(activeProject.id);
+    }
     await complete();
   };
 

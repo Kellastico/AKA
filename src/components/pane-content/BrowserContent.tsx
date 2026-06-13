@@ -15,6 +15,7 @@ import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { useProjectsStore } from "../../stores/use-projects-store";
 import { useDevServerStore } from "../../stores/use-dev-server-store";
 import {
+  clearWebviewCache,
   loadConfig,
   openExternalUrl,
   unwatchDir,
@@ -33,6 +34,22 @@ const normalize = (raw: string) => {
   if (!trimmed) return "";
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `http://${trimmed}`;
+};
+
+// Stamp a changing query param onto the iframe URL so every reload is a real
+// fetch. WKWebView happily serves a remounted iframe with an identical src
+// straight from its HTTP cache when the dev server doesn't send no-cache
+// headers (python http.server, serve, …) — which left the pane stale while a
+// normal browser, where the user hits ⌘R, revalidated and looked different.
+// Preserves any hash fragment (SPA hash routing).
+const bustCache = (raw: string, nonce: number): string => {
+  try {
+    const u = new URL(raw);
+    u.searchParams.set("aka_reload", String(nonce));
+    return u.toString();
+  } catch {
+    return raw;
+  }
 };
 
 const parsePort = (raw: string | undefined | null): number | null => {
@@ -149,6 +166,21 @@ export function BrowserContent({
     else setReloadNonce((n) => n + 1);
   };
 
+  // `hard` additionally wipes the webview's HTTP cache before refetching —
+  // the cache-busted src only guarantees a fresh *page*; the subresources it
+  // references can still come back stale from cache when the dev server sends
+  // no cache headers.
+  const reload = async (hard: boolean) => {
+    if (hard) {
+      try {
+        await clearWebviewCache();
+      } catch {
+        // Cache clear is best-effort — still reload.
+      }
+    }
+    setReloadNonce((n) => n + 1);
+  };
+
   const handleStart = async () => {
     setStartError(null);
     if (!projectPath) {
@@ -242,9 +274,9 @@ export function BrowserContent({
           spellCheck={false}
           className="min-w-0 flex-1 rounded-full bg-white/8 px-3 py-1.5 font-mono text-xs text-white/85 placeholder:text-white/30 outline-none focus:bg-white/12"
         />
-        <Tooltip label="Reload" side="bottom">
+        <Tooltip label="Reload — ⇧-click for hard reload (clears cache)" side="bottom">
           <button
-            onClick={() => setReloadNonce((n) => n + 1)}
+            onClick={(e) => void reload(e.shiftKey)}
             disabled={!url}
             className="flex h-7 w-7 items-center justify-center rounded-full text-white/60 hover:bg-white/10 hover:text-white/90 disabled:opacity-30 disabled:hover:bg-transparent"
             aria-label="Reload"
@@ -293,7 +325,7 @@ export function BrowserContent({
         <iframe
           ref={iframeRef}
           key={`${url}#${reloadNonce}`}
-          src={url}
+          src={bustCache(url, reloadNonce)}
           className="min-h-0 flex-1 w-full border-0 bg-white"
           title="Preview"
         />

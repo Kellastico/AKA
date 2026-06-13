@@ -54,6 +54,16 @@ fn is_noise(name: &str) -> bool {
     )
 }
 
+// Noise list for the *project watcher* — narrower than the listing one.
+// `dist` IS watched: when the preview serves a static build, the rebuild lands
+// there and must roll the preview forward, otherwise the pane reloads on the
+// source edit (into the old build) and then sits stale. `.next` and `target`
+// stay excluded because their dev servers write into them on every request —
+// watching them would put the preview in a reload loop.
+fn is_watch_noise(name: &str) -> bool {
+    matches!(name, ".git" | ".DS_Store" | "node_modules" | "target" | ".next")
+}
+
 fn mtime_ms(path: &PathBuf) -> Option<u128> {
     let meta = std::fs::metadata(path).ok()?;
     let t = meta.modified().ok()?;
@@ -192,53 +202,75 @@ pub async fn unwatch_file(
     Ok(())
 }
 
-/// Largest mtime anywhere under `p` (the directory itself and every non-noise
-/// descendant). Polling this and watching for it to increase is a cheap,
+/// Snapshot of a project tree for change detection: the largest mtime anywhere
+/// under the root, plus the number of files seen. Polling this is a cheap,
 /// dependency-free "did anything in the project change?" signal that works
 /// for every dev-server type — including static servers with no HMR/rebuild
-/// step of their own. Boxed future so the recursion type-checks.
-fn max_mtime_recursive(
+/// step of their own. The file count is what catches deletions, which a
+/// max-mtime-only check is blind to (removing a file never grows the max).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+struct TreeSnapshot {
+    max_mtime: u128,
+    file_count: u64,
+}
+
+impl TreeSnapshot {
+    /// True when `now` represents a change relative to `self`: anything was
+    /// written (mtime moved forward) or the file population shifted.
+    fn changed_to(self, now: TreeSnapshot) -> bool {
+        now.max_mtime > self.max_mtime || now.file_count != self.file_count
+    }
+}
+
+/// Walk the tree under `p` (skipping watch-noise dirs) and build a
+/// `TreeSnapshot`. Boxed future so the recursion type-checks.
+fn scan_tree_recursive(
     p: PathBuf,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = u128> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = TreeSnapshot> + Send>> {
     Box::pin(async move {
-        let mut max = mtime_ms(&p).unwrap_or(0);
+        let mut snap = TreeSnapshot {
+            max_mtime: mtime_ms(&p).unwrap_or(0),
+            file_count: 0,
+        };
         let mut rd = match tokio::fs::read_dir(&p).await {
             Ok(rd) => rd,
-            Err(_) => return max,
+            Err(_) => return snap,
         };
         while let Ok(Some(entry)) = rd.next_entry().await {
             let name = entry.file_name().to_string_lossy().to_string();
-            if is_noise(&name) {
+            if is_watch_noise(&name) {
                 continue;
             }
             let child = entry.path();
             match entry.file_type().await {
                 Ok(ft) if ft.is_dir() => {
-                    let m = max_mtime_recursive(child).await;
-                    if m > max {
-                        max = m;
+                    let m = scan_tree_recursive(child).await;
+                    if m.max_mtime > snap.max_mtime {
+                        snap.max_mtime = m.max_mtime;
                     }
+                    snap.file_count += m.file_count;
                 }
                 Ok(ft) if ft.is_file() => {
+                    snap.file_count += 1;
                     if let Some(m) = mtime_ms(&child) {
-                        if m > max {
-                            max = m;
+                        if m > snap.max_mtime {
+                            snap.max_mtime = m;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        max
+        snap
     })
 }
 
 /// Watch an entire project directory for changes and emit `project://changed`
-/// whenever anything under it is created/modified (noise dirs like
-/// `node_modules`, `.git`, `dist` are skipped so a build artifact churn or a
-/// package install doesn't spam reloads). The Preview pane subscribes to this
-/// so the rendered app refreshes on its own after the user — or an agent —
-/// edits files, with no manual reload click.
+/// whenever anything under it is created/modified/deleted (self-churning dirs
+/// like `node_modules`, `.git`, `.next` are skipped so a package install or a
+/// dev server's own writes don't spam reloads — see `is_watch_noise`). The
+/// Preview pane subscribes to this so the rendered app refreshes on its own
+/// after the user — or an agent — edits files, with no manual reload click.
 ///
 /// Keyed under a `dir:` prefix in the shared `WatcherState` map so it never
 /// collides with a single-file watcher on the same path. Re-watching the same
@@ -261,14 +293,14 @@ pub async fn watch_dir(
     let app_clone = app.clone();
     let handle = tokio::spawn(async move {
         let root = PathBuf::from(&path_clone);
-        let mut last = max_mtime_recursive(root.clone()).await;
+        let mut last = scan_tree_recursive(root.clone()).await;
         let mut ticker = tokio::time::interval(Duration::from_millis(DIR_POLL_INTERVAL_MS));
         // Skip the first immediate tick.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            let now = max_mtime_recursive(root.clone()).await;
-            if now > last {
+            let now = scan_tree_recursive(root.clone()).await;
+            if last.changed_to(now) {
                 last = now;
                 let _ = app_clone.emit(
                     EVT_PROJECT_CHANGED,

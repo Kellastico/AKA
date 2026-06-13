@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { load } from "@tauri-apps/plugin-store";
 import { useMessagesStore } from "./use-messages-store";
 import { useAgentsStore } from "./use-agents-store";
 import { useAttachmentsStore } from "./use-attachments-store";
@@ -262,13 +263,88 @@ async function ensureCheckpointListeners(): Promise<void> {
   });
 }
 
+// Models whose chat template prefills the <think> opener (DeepSeek-R1,
+// Mellum-Thinking…): their streams start already inside a thinking block and
+// only ever emit </think>. Learned the first time a stream produces a close
+// tag with no opener, and persisted — so every later run with that model
+// routes reasoning to the accordion live, instead of streaming it through the
+// message body until the close tag finally arrives (which, in agent mode, can
+// be the very end of the run: intermediate LLM calls are cut off mid-thinking
+// at each tool call and never emit their close).
+const THINK_PROFILE_FILE = "aka-think-profiles.json";
+const THINK_PROFILE_KEY = "prefillThinkModels";
+const prefillThinkModels = new Set<string>();
+void (async () => {
+  try {
+    const store = await load(THINK_PROFILE_FILE, { defaults: {}, autoSave: false });
+    const saved = await store.get<string[]>(THINK_PROFILE_KEY);
+    if (Array.isArray(saved)) for (const m of saved) prefillThinkModels.add(m);
+  } catch {
+    // Outside Tauri (browser dev) — in-memory only
+  }
+})();
+
+function isPrefillThinkModel(modelId?: string | null): boolean {
+  return !!modelId && prefillThinkModels.has(modelId);
+}
+
+function markPrefillThinkModel(modelId?: string | null) {
+  if (!modelId || prefillThinkModels.has(modelId)) return;
+  prefillThinkModels.add(modelId);
+  void (async () => {
+    try {
+      const store = await load(THINK_PROFILE_FILE, { defaults: {}, autoSave: false });
+      await store.set(THINK_PROFILE_KEY, [...prefillThinkModels]);
+      await store.save();
+    } catch {
+      // Outside Tauri — in-memory only
+    }
+  })();
+}
+
 // Incremental SSE parser that splits a token stream into "content" and
 // "thinking" deltas as <think>…</think> (or <thinking>…</thinking>) blocks
 // open and close. Tags split across chunks are buffered until they can be
 // matched, so the UI never flashes raw tag fragments.
-type ThinkParser = { buffer: string; inThink: boolean };
+//
+// Orphan close tags: when a close tag arrives with no opener before it
+// (prefilled-template models, see above), everything streamed since the last
+// close was actually reasoning — the parser folds its own pending content
+// into `thinking` and reports `reclaim`: how many chars the caller already
+// appended to the message body that must be moved to the thinking accordion.
+//
+// Speculative starts: for models already known to prefill, the parser starts
+// in thinking mode (`speculative: true`) so reasoning is contained live. If
+// the stream then ends cleanly without ever seeing a close tag, the
+// speculation was wrong — flushThinkParser reports `undoThinking` so the
+// caller can move the mis-routed text back to the message body.
+type ThinkParser = {
+  buffer: string;
+  inThink: boolean;
+  /** Content chars handed to the caller since the last think-block close. */
+  contentSinceClose: number;
+  /** inThink was set on faith (known prefill model), not by an actual tag. */
+  speculative: boolean;
+  /** Any close tag seen this stream — confirms the model really thinks. */
+  sawClose: boolean;
+  /** Thinking chars handed to the caller since stream start. */
+  thinkingEmitted: number;
+};
 const OPEN_TAGS = ["<thinking>", "<think>"];
 const CLOSE_TAGS = ["</thinking>", "</think>"];
+const ALL_TAGS = [...OPEN_TAGS, ...CLOSE_TAGS];
+
+function newThinkParser(modelId?: string | null): ThinkParser {
+  const prefill = isPrefillThinkModel(modelId);
+  return {
+    buffer: "",
+    inThink: prefill,
+    contentSinceClose: 0,
+    speculative: prefill,
+    sawClose: false,
+    thinkingEmitted: 0,
+  };
+}
 
 function findFirstTag(s: string, tags: string[]): { index: number; len: number } | null {
   let best: { index: number; len: number } | null = null;
@@ -292,10 +368,12 @@ function potentialTagAtEnd(s: string, tags: string[]): number {
 function processThinkChunk(
   state: ThinkParser,
   chunk: string,
-): { content: string; thinking: string } {
+): { content: string; thinking: string; reclaim: number; orphan: boolean } {
   state.buffer += chunk;
   let content = "";
   let thinking = "";
+  let reclaim = 0;
+  let orphan = false;
   while (state.buffer.length > 0) {
     if (state.inThink) {
       const hit = findFirstTag(state.buffer, CLOSE_TAGS);
@@ -305,32 +383,90 @@ function processThinkChunk(
         state.buffer = state.buffer.slice(state.buffer.length - hold);
         break;
       }
+      // A speculative thinking block closed by a real tag is the prefilled-
+      // template pattern too — the opener never streamed.
+      if (state.speculative) orphan = true;
       thinking += state.buffer.slice(0, hit.index);
       state.buffer = state.buffer.slice(hit.index + hit.len);
       state.inThink = false;
+      state.contentSinceClose = 0;
+      state.speculative = false;
+      state.sawClose = true;
     } else {
-      const hit = findFirstTag(state.buffer, OPEN_TAGS);
-      if (!hit) {
-        const hold = potentialTagAtEnd(state.buffer, OPEN_TAGS);
+      const openHit = findFirstTag(state.buffer, OPEN_TAGS);
+      const closeHit = findFirstTag(state.buffer, CLOSE_TAGS);
+      if (closeHit && (!openHit || closeHit.index < openHit.index)) {
+        // Orphan close — opener was prefilled by the model's chat template.
+        // Everything since the last close was reasoning: pending content from
+        // this call goes straight to thinking, already-appended chars are
+        // reported back for the caller to reclaim from the message body.
+        orphan = true;
+        state.sawClose = true;
+        thinking += content + state.buffer.slice(0, closeHit.index);
+        reclaim += state.contentSinceClose;
+        content = "";
+        state.contentSinceClose = 0;
+        state.buffer = state.buffer.slice(closeHit.index + closeHit.len);
+        continue;
+      }
+      if (!openHit) {
+        // Hold back partial close tags too, so an orphan </think> split
+        // across chunks can still be matched on the next call.
+        const hold = potentialTagAtEnd(state.buffer, ALL_TAGS);
         content += state.buffer.slice(0, state.buffer.length - hold);
         state.buffer = state.buffer.slice(state.buffer.length - hold);
         break;
       }
-      content += state.buffer.slice(0, hit.index);
-      state.buffer = state.buffer.slice(hit.index + hit.len);
+      content += state.buffer.slice(0, openHit.index);
+      state.buffer = state.buffer.slice(openHit.index + openHit.len);
       state.inThink = true;
     }
   }
-  return { content, thinking };
+  state.contentSinceClose += content.length;
+  state.thinkingEmitted += thinking.length;
+  return { content, thinking, reclaim, orphan };
 }
 
-function flushThinkParser(state: ThinkParser): { content: string; thinking: string } {
-  if (state.buffer.length === 0) return { content: "", thinking: "" };
+/**
+ * Drain whatever is still buffered when the stream ends. `cleanExit` should
+ * be true only for a normal end-of-stream (not a stop or crash): on a clean
+ * exit, a still-unconfirmed speculative parser means the model never actually
+ * thought, so `undoThinking` reports how many accordion chars to move back to
+ * the message body. On a cancelled run, mid-thinking is the expected state
+ * and the routed thinking is kept as-is.
+ */
+function flushThinkParser(
+  state: ThinkParser,
+  cleanExit = false,
+): { content: string; thinking: string; undoThinking: number } {
   const remaining = state.buffer;
   state.buffer = "";
+  if (state.speculative && !state.sawClose && cleanExit) {
+    return { content: remaining, thinking: "", undoThinking: state.thinkingEmitted };
+  }
   return state.inThink
-    ? { content: "", thinking: remaining }
-    : { content: remaining, thinking: "" };
+    ? { content: "", thinking: remaining, undoThinking: 0 }
+    : { content: remaining, thinking: "", undoThinking: 0 };
+}
+
+/** Route one parsed chunk to the message body / thinking accordion, moving
+ *  any body chars reclaimed by an orphan </think> first so the accordion
+ *  stays in chronological order. An orphan close also brands the model as
+ *  prefilled-template so its future streams start contained. */
+function routeThinkChunk(
+  placeholderId: string,
+  parsed: { content: string; thinking: string; reclaim: number; orphan?: boolean },
+  sessionId: string | null,
+  modelId?: string | null,
+) {
+  const store = useMessagesStore.getState();
+  if (parsed.orphan) markPrefillThinkModel(modelId);
+  if (parsed.reclaim > 0)
+    store.reclaimContentAsThinking(placeholderId, parsed.reclaim, sessionId);
+  if (parsed.content)
+    store.appendToMessage(placeholderId, parsed.content, sessionId);
+  if (parsed.thinking)
+    store.appendThinkingToMessage(placeholderId, parsed.thinking, sessionId);
 }
 
 
@@ -740,7 +876,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // The agent parser knows that agent's output format (SmallCode's
         // ⚙/✓/✗/┌─/└─ glyphs, etc.); the <think> parser handles inline
         // reasoning tags regardless of which agent emitted them.
-        const thinkParser: ThinkParser = { buffer: "", inThink: false };
+        const thinkParser = newThinkParser(modelId);
         const eventParser = parserForAgent(agent.bin);
         let currentToolMessageId: string | null = null;
         // Kind of the in-flight tool, captured at tool_start so tool_end can
@@ -800,6 +936,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         };
 
+        // True only when runAgent resolves (zero exit). Drives the flush-time
+        // speculation undo: a clean exit with no close tag ever seen means the
+        // speculatively-contained text was really the answer.
+        let agentCleanExit = false;
         try {
           unlistenOutput = await listen<{ runId: string; line: string; stream: string }>(
             "agent://output",
@@ -835,14 +975,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   currentToolKind = event.kind;
                 } else if (event.type === "tool_end") {
                   applyToolEnd(event);
+                  // The next text belongs to a fresh LLM call — prefilled-
+                  // template models re-enter thinking immediately, with no
+                  // opener ever streamed. Re-arm so it's contained live.
+                  if (!thinkParser.inThink && isPrefillThinkModel(modelId)) {
+                    thinkParser.inThink = true;
+                    thinkParser.speculative = true;
+                  }
                 } else {
                   // text → count chars for TPS, then route through <think> parser
                   agentCharCount += event.text.length;
-                  const { content, thinking } = processThinkChunk(
+                  const parsed = processThinkChunk(
                     thinkParser,
                     event.text + "\n",
                   );
-                  if (content) {
+                  if (parsed.content) {
                     // First answer text — drop the Thinking indicator now (we
                     // kept it through the tool phase so it sat below the work).
                     if (
@@ -855,14 +1002,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         ownerSessionId,
                       );
                     }
-                    store.appendToMessage(placeholderId, content, ownerSessionId);
                   }
-                  if (thinking)
-                    store.appendThinkingToMessage(
-                      placeholderId,
-                      thinking,
-                      ownerSessionId,
-                    );
+                  routeThinkChunk(placeholderId, parsed, ownerSessionId, modelId);
                 }
               }
             },
@@ -927,6 +1068,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               attachmentMeta,
             );
           }
+          agentCleanExit = true;
           if (genOf(runKey) !== myGen) {
             detach();
             return;
@@ -956,24 +1098,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           for (const event of eventParser.flush()) {
             if (event.type === "tool_end") applyToolEnd(event);
             else if (event.type === "text") {
-              const { content, thinking } = processThinkChunk(
-                thinkParser,
-                event.text + "\n",
+              routeThinkChunk(
+                placeholderId,
+                processThinkChunk(thinkParser, event.text + "\n"),
+                ownerSessionId,
+                modelId,
               );
-              const store = useMessagesStore.getState();
-              if (content)
-                store.appendToMessage(placeholderId, content, ownerSessionId);
-              if (thinking)
-                store.appendThinkingToMessage(
-                  placeholderId,
-                  thinking,
-                  ownerSessionId,
-                );
             }
           }
           // Then drain the <think> parser for any half-buffered tail.
-          const { content, thinking } = flushThinkParser(thinkParser);
+          const { content, thinking, undoThinking } = flushThinkParser(
+            thinkParser,
+            agentCleanExit,
+          );
           const store = useMessagesStore.getState();
+          if (undoThinking > 0)
+            store.reclaimThinkingToContent(placeholderId, undoThinking, ownerSessionId);
           if (content) store.appendToMessage(placeholderId, content, ownerSessionId);
           if (thinking)
             store.appendThinkingToMessage(placeholderId, thinking, ownerSessionId);
@@ -1105,7 +1245,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       let unlistenDone: UnlistenFn | null = null;
       let unlistenError: UnlistenFn | null = null;
 
-      const parser: ThinkParser = { buffer: "", inThink: false };
+      const parser = newThinkParser(modelId);
 
       // Live tokens-per-second tracker. We don't have a real tokenizer in
       // the WebView, so we approximate with characters/4 (the same heuristic
@@ -1137,7 +1277,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : Math.min(MAX_CHARS_PER_TICK, pendingDisplay.length);
         const slice = pendingDisplay.slice(0, take);
         pendingDisplay = pendingDisplay.slice(take);
-        const { content, thinking } = processThinkChunk(parser, slice);
+        const parsed = processThinkChunk(parser, slice);
         const store = useMessagesStore.getState();
         const target = ownerMessages().find((m) => m.id === placeholderId);
         if (target?.pendingSince !== undefined) {
@@ -1147,9 +1287,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ownerSessionId,
           );
         }
-        if (content) store.appendToMessage(placeholderId, content, ownerSessionId);
-        if (thinking)
-          store.appendThinkingToMessage(placeholderId, thinking, ownerSessionId);
+        routeThinkChunk(placeholderId, parsed, ownerSessionId, modelId);
       };
 
       const typewriterInterval = setInterval(() => {
@@ -1214,14 +1352,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
 
       try {
-        unlistenChunk = await listen<{ runId: string; text: string }>(
+        unlistenChunk = await listen<{
+          runId: string;
+          text: string;
+          thinking?: string;
+        }>(
           "llm://chunk",
           (e) => {
             // Ignore other sessions' streams — they carry a different runId.
             if (e.payload.runId !== runKey) return;
             if (genOf(runKey) !== myGen) return;
-            charCount += e.payload.text.length;
             lastChunkAt = Date.now(); // feed the stuck watchdog
+            // Runtime-separated reasoning (Ollama `reasoning`, DeepSeek-style
+            // `reasoning_content`) arrives on its own field — route it
+            // straight to the accordion, bypassing the typewriter/tag parser.
+            if (e.payload.thinking) {
+              // The runtime separates thinking for us, so the content stream
+              // is pure answer — drop any speculative thinking-first stance.
+              if (parser.speculative) {
+                parser.inThink = false;
+                parser.speculative = false;
+              }
+              charCount += e.payload.thinking.length;
+              const store = useMessagesStore.getState();
+              if (
+                ownerMessages().find((m) => m.id === placeholderId)
+                  ?.pendingSince !== undefined
+              ) {
+                store.patchMessage(
+                  placeholderId,
+                  { pendingSince: undefined },
+                  ownerSessionId,
+                );
+              }
+              store.appendThinkingToMessage(
+                placeholderId,
+                e.payload.thinking,
+                ownerSessionId,
+              );
+            }
+            charCount += e.payload.text.length;
             // Push into the typewriter buffer — the steady-rate interval will
             // drain it into the rendered message.
             pendingDisplay += e.payload.text;
@@ -1236,8 +1406,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // Drain whatever is still buffered before flushing the think parser.
           streamEnded = true;
           while (pendingDisplay.length > 0) flushTypewriter();
-          const { content, thinking } = flushThinkParser(parser);
+          const { content, thinking, undoThinking } = flushThinkParser(parser, true);
           const store = useMessagesStore.getState();
+          if (undoThinking > 0)
+            store.reclaimThinkingToContent(placeholderId, undoThinking, ownerSessionId);
           if (content) store.appendToMessage(placeholderId, content, ownerSessionId);
           if (thinking)
             store.appendThinkingToMessage(placeholderId, thinking, ownerSessionId);

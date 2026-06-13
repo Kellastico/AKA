@@ -112,6 +112,18 @@ function folderName(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() ?? path;
 }
 
+function newSession(): Session {
+  return {
+    id: crypto.randomUUID(),
+    title: "New session",
+    updatedAt: new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }),
+  };
+}
+
 /**
  * Build the `.äkä/config.json` we want to scaffold for a freshly-imported
  * project. Seeded from the user's current global selections (last-used agent
@@ -203,16 +215,26 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   },
 
   addProject: async (folderPath: string) => {
+    // Every import starts with its own fresh session, activated atomically
+    // with the project. Without this the previous project's activeSessionId
+    // survived the import — the session-message sync hook saw no change and
+    // kept the old project's chat on screen under the new project.
+    const session = newSession();
     const project: Project = {
       id: crypto.randomUUID(),
       name: folderName(folderPath),
       path: folderPath,
-      sessions: [],
+      sessions: [session],
       displayMode: "morph",
     };
     const projects = [...get().projects, project];
-    set({ projects, activeProjectId: project.id });
+    set({
+      projects,
+      activeProjectId: project.id,
+      activeSessionId: session.id,
+    });
     await persist(projects);
+    await persistActiveIds(project.id, session.id);
 
     // Scaffold .äkä/config.json immediately, seeded from the user's last-used
     // agent + runtime. Without this, the very first launch in a freshly-
@@ -271,15 +293,7 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
   },
 
   startNewSession: async (projectId) => {
-    const session: Session = {
-      id: crypto.randomUUID(),
-      title: "New session",
-      updatedAt: new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }),
-    };
+    const session = newSession();
     const projects = get().projects.map((p) =>
       p.id === projectId ? { ...p, sessions: [session, ...p.sessions] } : p,
     );

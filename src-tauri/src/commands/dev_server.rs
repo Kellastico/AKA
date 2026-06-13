@@ -255,3 +255,17 @@ pub async fn kill_port(port: u16) -> Result<u32, String> {
         Ok(killed)
     }
 }
+
+/// Wipe the webview's HTTP cache (and other browsing data). Backs the Preview
+/// pane's hard reload: the iframe's *page* fetch is cache-busted with a query
+/// param, but the subresources it references (JS/CSS/images) are requested by
+/// the dev server's own URLs and can still be served stale from WKWebView's
+/// cache when the server doesn't send no-cache headers. AKA itself keeps no
+/// state in browser storage (config lives in tauri-plugin-store files), so
+/// clearing everything is safe.
+#[tauri::command]
+pub async fn clear_webview_cache(window: tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .clear_all_browsing_data()
+        .map_err(|e| format!("clear webview cache: {e}"))
+}

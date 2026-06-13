@@ -76,6 +76,7 @@ pub fn run() {
             commands::dev_server::stop_dev_server,
             commands::dev_server::dev_server_status,
             commands::dev_server::kill_port,
+            commands::dev_server::clear_webview_cache,
             commands::diff::git_diff,
             commands::files::read_text_file,
             commands::files::read_image_base64,
