@@ -38,7 +38,8 @@ import {
   type CheckpointCreated,
   type ContentPart,
 } from "../lib/tauri/commands";
-import { isMultimodalModel } from "../lib/model-capabilities";
+import { resolveVision } from "../lib/model-capabilities";
+import { buildTaskEnvelope } from "../features/08-context-engine/task-envelope";
 import { gateForRun } from "../lib/session-concurrency";
 
 /** True when the active runtime is the built-in (managed) sidecar. */
@@ -817,7 +818,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // it happens, not after a long silence.
       void (async () => {
         const attachmentCtx = await resolveAttachments();
-        const task = attachmentCtx ? text + attachmentCtx : text;
+        // Wrap the raw prompt in the Task Envelope (feature 08): objective +
+        // scope rails + definition of done + attachment manifest. Sharpens any
+        // agent, and — on a vision model — explicitly tells it to look at the
+        // attached images instead of just receiving their paths.
+        const cfg = useProjectConfigStore.getState().config;
+        const task = buildTaskEnvelope({
+          task: text,
+          template: cfg?.task_template,
+          attachments,
+          attachmentContext: attachmentCtx,
+          verifyCmd: cfg?.agent.verify_cmd,
+          visionModel: resolveVision(modelId, cfg?.runtime.vision),
+        });
 
         // Checkpoints: make sure the global listeners are live, remember this
         // run's task (for `restart`), and probe whether the project is a git
@@ -1189,7 +1202,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // image bytes inlined as base64 `data:` URLs. Text-only models (and
       // messages without images) keep the plain-string content. Building is
       // async because each image is re-read/encoded from disk on demand.
-      const multimodal = isMultimodalModel(modelId);
+      const multimodal = resolveVision(
+        modelId,
+        useProjectConfigStore.getState().config?.runtime.vision,
+      );
       const history: ChatMessage[] = await Promise.all(
         ownerMessages()
           .filter((m) => m.role === "user" || m.role === "assistant")

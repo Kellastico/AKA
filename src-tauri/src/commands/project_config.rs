@@ -33,6 +33,20 @@ pub struct RuntimeBlock {
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Optional system prompt prepended to the built-in chat path (and exported
+    /// to agents as `AKA_SYSTEM_PROMPT`). `None`/empty = none.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Sampling controls. `None` falls back to AKA's accuracy-leaning defaults
+    /// (see `llm.rs`). Stored per project so each can be tuned independently.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    /// Explicit override of the vision-capability heuristic. `None` = auto-detect
+    /// from the model id; `Some(true/false)` forces the answer.
+    #[serde(default)]
+    pub vision: Option<bool>,
 }
 
 impl Default for RuntimeBlock {
@@ -41,6 +55,10 @@ impl Default for RuntimeBlock {
             base_url: DEFAULT_BASE_URL.to_string(),
             model: String::new(),
             api_key: None,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            vision: None,
         }
     }
 }
@@ -93,6 +111,13 @@ pub struct ProjectConfig {
     pub sandbox: SandboxBlock,
     #[serde(default)]
     pub dev_server: DevServerBlock,
+    /// Optional custom Task Envelope template (the structured wrapper AKA builds
+    /// around the user's raw prompt for agent runs). `None` = use the built-in
+    /// default template; "Reset to default" sets it back to `None`. The template
+    /// text itself lives in the frontend (`task-envelope.ts`) — AKA only persists
+    /// the user's override here.
+    #[serde(default)]
+    pub task_template: Option<String>,
 }
 
 impl Default for ProjectConfig {
@@ -104,6 +129,7 @@ impl Default for ProjectConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             sandbox: SandboxBlock::default(),
             dev_server: DevServerBlock::default(),
+            task_template: None,
         }
     }
 }

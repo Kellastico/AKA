@@ -164,6 +164,13 @@ export type RuntimeBlock = {
   base_url: string;
   model: string;
   api_key: string | null;
+  /** System prompt prepended to the chat path / exported to agents. */
+  system_prompt?: string | null;
+  /** Sampling controls; null falls back to AKA's accuracy-leaning defaults. */
+  temperature?: number | null;
+  top_p?: number | null;
+  /** Explicit vision-capability override; null = auto-detect from model id. */
+  vision?: boolean | null;
 };
 
 export type AgentBlock = {
@@ -195,6 +202,8 @@ export type ProjectConfig = {
   max_retries: number;
   sandbox: SandboxBlock;
   dev_server: DevServerBlock;
+  /** Custom Task Envelope template; null = use the built-in default. */
+  task_template?: string | null;
 };
 
 export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
@@ -202,6 +211,10 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     base_url: "http://localhost:11434/v1",
     model: "",
     api_key: null,
+    system_prompt: null,
+    temperature: null,
+    top_p: null,
+    vision: null,
   },
   agent: {
     name: "",
@@ -219,6 +232,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     cmd: "",
     args: [],
   },
+  task_template: null,
 };
 
 export async function loadConfig(projectPath: string): Promise<ProjectConfig> {

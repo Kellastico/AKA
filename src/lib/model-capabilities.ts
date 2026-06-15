@@ -49,3 +49,20 @@ export function isMultimodalModel(
 
   return false;
 }
+
+/**
+ * Resolve whether a model is vision-capable, honoring an explicit per-project
+ * override before falling back to the {@link isMultimodalModel} heuristic. The
+ * override comes from `RuntimeBlock.vision` (the "Vision-capable" checkbox):
+ * `true`/`false` force the answer, `null`/`undefined` means "auto-detect".
+ *
+ * Use this — not `isMultimodalModel` directly — at every image gate so the
+ * user can correct a runtime the heuristic doesn't recognize (e.g. a custom
+ * MiniCPM build whose id doesn't contain a known token).
+ */
+export function resolveVision(
+  modelId: string | null | undefined,
+  override?: boolean | null,
+): boolean {
+  return override ?? isMultimodalModel(modelId);
+}

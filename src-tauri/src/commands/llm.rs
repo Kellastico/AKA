@@ -404,11 +404,21 @@ pub async fn summarize_session(
         .ok_or(AppError::SummarizationFailed)
 }
 
+/// AKA's accuracy-leaning sampling defaults, applied when a project hasn't set
+/// its own (`RuntimeBlock.temperature` / `top_p` are `None`). Low temperature
+/// noticeably tightens instruction-following on small local models.
+const DEFAULT_TEMPERATURE: f32 = 0.15;
+const DEFAULT_TOP_P: f32 = 0.9;
+
 #[derive(Debug, Serialize)]
 struct ChatStreamRequest<'a> {
     model: &'a str,
     messages: &'a [Message],
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
 }
 
 /// Stream a chat completion from the project's runtime. Token deltas are
@@ -486,7 +496,7 @@ async fn run_stream(
     app: &AppHandle,
     run_id: &str,
     cancel: &Arc<AtomicBool>,
-    messages: Vec<Message>,
+    mut messages: Vec<Message>,
     project_path: String,
     model: Option<String>,
 ) -> Result<(), String> {
@@ -502,6 +512,25 @@ async fn run_stream(
         return Err("No model selected".into());
     }
 
+    // Prepend the project's system prompt — but only when the caller didn't
+    // already supply one (the summarizer/correction paths build their own).
+    if let Some(sp) = runtime.system_prompt.as_deref() {
+        if !sp.trim().is_empty() && !messages.iter().any(|m| m.role == "system") {
+            messages.insert(
+                0,
+                Message {
+                    role: "system".into(),
+                    content: MessageContent::Text(sp.to_string()),
+                },
+            );
+        }
+    }
+
+    // Sampling: honor the project's values, else fall back to AKA's
+    // accuracy-leaning defaults so sharpening applies out of the box.
+    let temperature = Some(runtime.temperature.unwrap_or(DEFAULT_TEMPERATURE));
+    let top_p = Some(runtime.top_p.unwrap_or(DEFAULT_TOP_P));
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -516,6 +545,8 @@ async fn run_stream(
             model: &model_id,
             messages: &messages,
             stream: true,
+            temperature,
+            top_p,
         });
     if let Some(key) = runtime.api_key.as_deref() {
         if !key.is_empty() {

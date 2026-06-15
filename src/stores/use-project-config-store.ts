@@ -55,6 +55,13 @@ type ProjectConfigState = {
   setMode: (mode: string) => Promise<void>;
   setVerifyCmd: (cmd: string) => Promise<void>;
   setMaxRetries: (n: number) => Promise<void>;
+  // NOTE: The model-tuning fields (runtime.system_prompt / temperature / top_p /
+  // vision, and task_template) are intentionally edited at the .äkä/config.json
+  // level for now — there is deliberately no in-app setter/UI yet. The backend
+  // and Task Envelope read them straight from disk on each run, and AKA applies
+  // its accuracy-leaning defaults when they're unset, so most users get the
+  // sharpening automatically. Re-add `setRuntimeTuning` / `setTaskTemplate` here
+  // (mirroring `setAgent`) when the tuning UI lands later.
 };
 
 /**

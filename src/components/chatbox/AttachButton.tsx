@@ -14,7 +14,8 @@ import {
   useAttachmentsStore,
 } from "../../stores/use-attachments-store";
 import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
-import { isMultimodalModel } from "../../lib/model-capabilities";
+import { resolveVision } from "../../lib/model-capabilities";
+import { useProjectConfigStore } from "../../stores/use-project-config-store";
 import { pickFiles, pickFolders } from "../../lib/tauri/commands";
 
 type Option = {
@@ -40,7 +41,10 @@ export function AttachButton({ compact }: { compact?: boolean }) {
   const addPaths = useAttachmentsStore((s) => s.addPaths);
   const addUrl = useAttachmentsStore((s) => s.addUrl);
   const selectedModelId = useRuntimeStore((s) => s.selectedModelId);
-  const multimodal = isMultimodalModel(selectedModelId);
+  // Honor the per-project "Vision-capable" override before the id heuristic, so
+  // the image gate flips the moment the user toggles the checkbox.
+  const visionOverride = useProjectConfigStore((s) => s.config?.runtime.vision);
+  const multimodal = resolveVision(selectedModelId, visionOverride);
 
   const handlePick = async (kind: AttachmentKind) => {
     if (kind === "url") {

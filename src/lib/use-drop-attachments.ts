@@ -6,7 +6,8 @@ import {
 } from "../stores/use-attachments-store";
 import { useRuntimeStore } from "../features/01-llm-provider/use-runtime-store";
 import { useDragStore } from "../stores/use-drag-store";
-import { isMultimodalModel } from "./model-capabilities";
+import { useProjectConfigStore } from "../stores/use-project-config-store";
+import { resolveVision } from "./model-capabilities";
 
 const hasTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -38,7 +39,10 @@ export function useDropAttachments() {
 function classifyPaths(paths: string[]) {
   if (paths.length === 0) return;
   const modelId = useRuntimeStore.getState().selectedModelId;
-  const multimodal = isMultimodalModel(modelId);
+  const multimodal = resolveVision(
+    modelId,
+    useProjectConfigStore.getState().config?.runtime.vision,
+  );
   let acceptedCount = 0;
   let rejectedCount = 0;
 
@@ -65,7 +69,10 @@ function ingestPaths(paths: string[]) {
     return;
   }
   const modelId = useRuntimeStore.getState().selectedModelId;
-  const multimodal = isMultimodalModel(modelId);
+  const multimodal = resolveVision(
+    modelId,
+    useProjectConfigStore.getState().config?.runtime.vision,
+  );
 
   const files: string[] = [];
   const images: string[] = [];
@@ -147,7 +154,10 @@ function browserFallback() {
     if (counter !== 1) return; // already tracking
 
     const modelId = useRuntimeStore.getState().selectedModelId;
-    const multimodal = isMultimodalModel(modelId);
+    const multimodal = resolveVision(
+    modelId,
+    useProjectConfigStore.getState().config?.runtime.vision,
+  );
     let acceptedCount = 0;
     let rejectedCount = 0;
 

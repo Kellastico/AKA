@@ -180,6 +180,18 @@ fn strip_ansi(input: &str) -> String {
                 Some('[') => {
                     chars.next();
                     while let Some(&n) = chars.peek() {
+                        // A literal '[' inside a CSI is content, not a final
+                        // byte. Programs never emit `ESC [ [` on stdout; that
+                        // only appears when a degenerate/empty escape sits in
+                        // front of a bracketed token (e.g. an agent banner like
+                        // `[enyö-änyä]`). Without this guard the '[' (0x5b ∈ the
+                        // 0x40–0x7e final range) is swallowed as the escape's
+                        // final byte, silently dropping the user's bracket.
+                        // ('[' as a real CSI final is the Linux-console F-key
+                        // INPUT encoding, which never reaches an agent's output.)
+                        if n == '[' {
+                            break;
+                        }
                         chars.next();
                         if ('\x40'..='\x7e').contains(&n) {
                             break; // CSI final byte
@@ -386,6 +398,20 @@ pub async fn run_agent(
     env.insert("AKA_TASK".into(), task.clone());
     if task_file_ok {
         env.insert("AKA_TASK_FILE".into(), task_file.to_string_lossy().into_owned());
+    }
+    // Tuning contract — agents that read it can apply the same sharpening AKA
+    // applies on its own chat path. Each is omitted when unset, so an agent
+    // that ignores them (and tuning-free projects) behave exactly as before.
+    if let Some(sp) = cfg.runtime.system_prompt.as_deref() {
+        if !sp.trim().is_empty() {
+            env.insert("AKA_SYSTEM_PROMPT".into(), sp.to_string());
+        }
+    }
+    if let Some(t) = cfg.runtime.temperature {
+        env.insert("AKA_TEMPERATURE".into(), t.to_string());
+    }
+    if let Some(p) = cfg.runtime.top_p {
+        env.insert("AKA_TOP_P".into(), p.to_string());
     }
     // Attachment contract — give vision/file-aware agents the files AKA can't
     // inject into their own model call:
@@ -848,6 +874,25 @@ mod tests {
     fn ignores_overly_long_lines() {
         let long = "x".repeat(600) + "?";
         assert_eq!(classify_prompt(&long), None);
+    }
+
+    #[test]
+    fn preserves_literal_bracket_after_degenerate_csi() {
+        // Regression: an agent banner like `[enyö-änyä]` printed right after a
+        // degenerate/empty CSI (`ESC [`) must keep its leading '['. Before the
+        // fix, '[' (0x5b) was consumed as the escape's "final byte", so the
+        // line rendered as `enyö-änyä]` with the opening bracket gone.
+        assert_eq!(strip_ansi("\x1b[[enyö-änyä] hi"), "[enyö-änyä] hi");
+        // And the common, well-formed colorings still strip cleanly while
+        // keeping the literal bracket that follows them.
+        assert_eq!(strip_ansi("\x1b[2m[enyö-änyä]\x1b[0m hi"), "[enyö-änyä] hi");
+        assert_eq!(
+            strip_ansi("\x1b[38;5;208m[enyö-änyä]\x1b[0m hi"),
+            "[enyö-änyä] hi"
+        );
+        assert_eq!(strip_ansi("\x1b[m[brackets] kept"), "[brackets] kept");
+        // A real CSI insert-char final (`@`, 0x40) is still consumed.
+        assert_eq!(strip_ansi("\x1b[@text"), "text");
     }
 
     #[test]
