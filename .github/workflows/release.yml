@@ -50,8 +50,23 @@ jobs:
         shell: bash
         run: bash src-tauri/scripts/rename-runtime.sh ${{ matrix.sidecar_triple }}
 
+      - name: Build aka-tool shim
+        shell: bash
+        run: bash src-tauri/scripts/build-tool.sh ${{ matrix.sidecar_triple }}
+
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Load release notes
+        id: notes
+        shell: bash
+        run: |
+          FILE=".github/RELEASE_NOTES_${{ github.ref_name }}.md"
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            if [[ -f "$FILE" ]]; then cat "$FILE"; else echo "${{ github.ref_name }}"; fi
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and publish
         uses: tauri-apps/tauri-action@v0
@@ -60,4 +75,5 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
+          releaseBody: ${{ steps.notes.outputs.body }}
           args: ${{ matrix.args }}
