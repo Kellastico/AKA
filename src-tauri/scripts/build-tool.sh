@@ -31,17 +31,25 @@ else
   SRC="$TAURI_DIR/target/release/aka-tool"
 fi
 
-# Scrub the builder's absolute paths from the binary, matching rename-runtime.sh.
-REMAP_RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home/builder"
-( cd "$TAURI_DIR" && RUSTFLAGS="$REMAP_RUSTFLAGS" cargo build --release --bin aka-tool ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} )
-
 EXT=""
 case "$TRIPLE" in
   *windows*) EXT=".exe" ;;
 esac
 SRC="${SRC}${EXT}"
-
 mkdir -p "$BIN_DIR"
 DEST="$BIN_DIR/aka-tool-${TRIPLE}${EXT}"
+
+# aka-tool is a [[bin]] inside the main tauri crate, so compiling it runs
+# tauri-build, which fails the build unless every externalBin — including
+# aka-tool itself — already exists for the target. On a fresh checkout it
+# doesn't, a chicken-and-egg. Seed a placeholder so the compile proceeds; the
+# real binary overwrites it immediately after the build.
+[[ -f "$DEST" ]] || : > "$DEST"
+
+# Scrub the builder's absolute paths from the binary, matching rename-runtime.sh.
+REMAP_RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/home/builder"
+( cd "$TAURI_DIR" && RUSTFLAGS="$REMAP_RUSTFLAGS" cargo build --release --bin aka-tool ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} )
+
 cp "$SRC" "$DEST"
+chmod +x "$DEST"  # cp onto the placeholder keeps its (non-exec) mode; force it
 echo "Copied -> $DEST"
