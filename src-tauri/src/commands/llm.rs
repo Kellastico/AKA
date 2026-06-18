@@ -1,13 +1,16 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
+use tokio::process::Command;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::commands::project_config::load_from_disk;
 use crate::error::AppError;
@@ -113,7 +116,18 @@ const SUMMARIZER_SYSTEM_PROMPT: &str = "You are a session summarizer. Given a co
 pub struct DetectedRuntime {
     pub name: String,
     pub base_url: String,
+    /// The port responded to `GET /models` — the runtime is up right now.
     pub healthy: bool,
+    /// The runtime is present on this machine (CLI binary or app bundle found),
+    /// even if it isn't running. Lets the UI hide runtimes the user doesn't have
+    /// instead of showing them as dead rows.
+    pub installed: bool,
+    /// AKA spawned this runtime's server and holds its process handle, so it can
+    /// stop it. Drives the Stop button.
+    pub managed: bool,
+    /// AKA knows a headless command to boot this runtime as a child process it
+    /// owns. Drives whether a Play button is offered.
+    pub launchable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,19 +212,131 @@ struct ChatRequest<'a> {
     messages: &'a [Message],
 }
 
-const PROBES: &[(&str, &str)] = &[
-    ("Ollama", "http://localhost:11434/v1"),
-    ("LM Studio", "http://localhost:1234/v1"),
-    ("llama.cpp", "http://localhost:8080/v1"),
+/// A local runtime we know how to look for. `base_url` is its published default
+/// OpenAI-compatible endpoint; `binaries` / `app_bundles` are the signals that
+/// tell us it's *installed* even when it isn't running, so the UI can hide
+/// runtimes the user doesn't have rather than showing dead rows.
+/// A command AKA can run to boot a runtime as a child process it owns (so it
+/// can stop it too). `program` is resolved against the search path at launch.
+struct Launch {
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+struct Probe {
+    name: &'static str,
+    base_url: &'static str,
+    /// CLI executables that indicate this runtime is installed (any match).
+    binaries: &'static [&'static str],
+    /// macOS app-bundle names (without `.app`) that indicate it's installed.
+    app_bundles: &'static [&'static str],
+    /// How AKA boots this runtime headlessly. `None` for runtimes it can't
+    /// cleanly start+stop — GUI-only (LM Studio, Jan) or model-required
+    /// (llama.cpp). Those keep their Install link / manual start.
+    launch: Option<Launch>,
+}
+
+/// Local runtimes auto-detected on startup (and on the 5s background poll).
+/// Each is probed with a 1s `GET {base_url}/models` for liveness plus a
+/// filesystem check for install status. Ports are each server's published
+/// default — except MLX: `mlx_lm.server` also defaults to 8080, which collides
+/// with llama.cpp, and two probes can't share a base URL (the panel keys rows
+/// by URL). So we probe MLX on 8081; launch it there with
+/// `mlx_lm.server --port 8081`. Anything on a non-default port can still be
+/// added via "Add custom endpoint".
+const PROBES: &[Probe] = &[
+    Probe {
+        name: "Ollama",
+        base_url: "http://localhost:11434/v1",
+        binaries: &["ollama"],
+        app_bundles: &["Ollama"],
+        launch: Some(Launch {
+            program: "ollama",
+            args: &["serve"],
+        }),
+    },
+    Probe {
+        name: "LM Studio",
+        base_url: "http://localhost:1234/v1",
+        binaries: &["lms"],
+        app_bundles: &["LM Studio"],
+        launch: None,
+    },
+    Probe {
+        name: "llama.cpp",
+        base_url: "http://localhost:8080/v1",
+        binaries: &["llama-server", "llama-cli"],
+        app_bundles: &[],
+        launch: None,
+    },
+    Probe {
+        name: "MLX",
+        base_url: "http://localhost:8081/v1",
+        binaries: &["mlx_lm.server"],
+        app_bundles: &[],
+        // Boot on 8081 to match our probe (its default 8080 collides with
+        // llama.cpp). Starts with no model — it loads per request; you still
+        // need a model downloaded to actually answer.
+        launch: Some(Launch {
+            program: "mlx_lm.server",
+            args: &["--port", "8081"],
+        }),
+    },
+    Probe {
+        name: "Jan",
+        base_url: "http://localhost:1337/v1",
+        binaries: &[],
+        app_bundles: &["Jan"],
+        launch: None,
+    },
 ];
 
-async fn probe_one(name: &'static str, base_url: &'static str) -> DetectedRuntime {
-    let healthy = check_health(base_url, None).await;
-    DetectedRuntime {
-        name: name.to_string(),
-        base_url: base_url.to_string(),
-        healthy,
+/// Directories to search for runtime CLIs, on top of the process `PATH`. A
+/// macOS app launched from Finder/Dock doesn't inherit the user's shell `PATH`,
+/// so we also check the common Homebrew and pip/pipx user-install locations —
+/// enough to spot `ollama`, `llama-server`, `mlx_lm.server`, etc. without
+/// spawning a login shell.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/bin"));
+        // pip `--user` on macOS system Python lands in ~/Library/Python/<ver>/bin.
+        if let Ok(entries) = std::fs::read_dir(home.join("Library/Python")) {
+            for entry in entries.flatten() {
+                dirs.push(entry.path().join("bin"));
+            }
+        }
     }
+    dirs
+}
+
+/// Whether a runtime is installed: any of its CLI binaries is on the search
+/// path, or any of its app bundles is present. Cheap filesystem stats — no
+/// processes spawned.
+fn is_installed(probe: &Probe, dirs: &[PathBuf]) -> bool {
+    let has_binary = probe
+        .binaries
+        .iter()
+        .any(|name| dirs.iter().any(|d| d.join(name).is_file()));
+    if has_binary {
+        return true;
+    }
+    if probe.app_bundles.is_empty() {
+        return false;
+    }
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    probe
+        .app_bundles
+        .iter()
+        .any(|name| roots.iter().any(|r| r.join(format!("{name}.app")).exists()))
 }
 
 async fn check_health(base_url: &str, api_key: Option<&str>) -> bool {
@@ -234,12 +360,140 @@ async fn check_health(base_url: &str, api_key: Option<&str>) -> bool {
 }
 
 #[tauri::command]
-pub async fn detect_runtimes() -> Vec<DetectedRuntime> {
-    let futures = PROBES
+pub async fn detect_runtimes(
+    launcher: State<'_, RuntimeLauncher>,
+) -> Result<Vec<DetectedRuntime>, String> {
+    // Liveness probes run concurrently; install checks are cheap local stats.
+    let health = join_all(PROBES.iter().map(|p| check_health(p.base_url, None))).await;
+    let dirs = search_dirs();
+    let managed: std::collections::HashSet<String> = {
+        let guard = launcher.map.lock().await;
+        guard.keys().cloned().collect()
+    };
+    Ok(PROBES
         .iter()
-        .map(|(name, url)| probe_one(name, url))
-        .collect::<Vec<_>>();
-    join_all(futures).await
+        .zip(health)
+        .map(|(probe, healthy)| DetectedRuntime {
+            name: probe.name.to_string(),
+            base_url: probe.base_url.to_string(),
+            healthy,
+            installed: is_installed(probe, &dirs),
+            managed: managed.contains(probe.name),
+            launchable: probe.launch.is_some(),
+        })
+        .collect())
+}
+
+/// A runtime server AKA launched and now owns. `id` distinguishes generations
+/// so a quick stop→start can't have the old child's wait-task evict the new
+/// child's slot (cf. the stream-cancellation `Arc::ptr_eq` trick).
+struct Managed {
+    id: u64,
+    kill: oneshot::Sender<()>,
+}
+
+/// Tracks the runtime servers AKA has booted, keyed by runtime name. Each
+/// `Child` is owned by its own wait-task (never behind the lock during
+/// `child.wait()`); the map only holds a kill channel — same shape as
+/// `DevServerState`, generalized to many runtimes at once.
+#[derive(Default)]
+pub struct RuntimeLauncher {
+    next_id: AtomicU64,
+    map: Arc<Mutex<HashMap<String, Managed>>>,
+}
+
+/// Resolve a program name to an absolute path using the same search dirs as
+/// install detection, falling back to the bare name (let the OS resolve it via
+/// `PATH`, which `path_env::fix` has already repaired at startup).
+fn resolve_program(program: &str, dirs: &[PathBuf]) -> PathBuf {
+    dirs.iter()
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(program))
+}
+
+/// Boot a runtime AKA knows how to launch. Idempotent — a second call while it's
+/// already managed is a no-op. The server comes up in the background; the row
+/// flips to healthy on the next detection poll once its port answers.
+#[tauri::command]
+pub async fn start_runtime(
+    launcher: State<'_, RuntimeLauncher>,
+    name: String,
+) -> Result<(), String> {
+    let probe = PROBES
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("Unknown runtime: {name}"))?;
+    let launch = probe
+        .launch
+        .as_ref()
+        .ok_or_else(|| format!("{name} can't be started by AKA"))?;
+
+    // Already managing a live child for this runtime — nothing to do.
+    {
+        let guard = launcher.map.lock().await;
+        if guard.contains_key(&name) {
+            return Ok(());
+        }
+    }
+
+    let dirs = search_dirs();
+    let program = resolve_program(launch.program, &dirs);
+
+    let mut cmd = Command::new(&program);
+    cmd.args(launch.args);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Couldn't start {name} ({}): {e}", launch.program))?;
+
+    let id = launcher.next_id.fetch_add(1, Ordering::SeqCst);
+    let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = launcher.map.lock().await;
+        guard.insert(name.clone(), Managed { id, kill: kill_tx });
+    }
+
+    // The wait-task OWNS the child (no shared lock during wait). It races a
+    // natural exit against the Stop signal; either way it clears its own slot
+    // on the way out — but only if it's still the current generation.
+    let map = launcher.map.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = child.wait() => {}
+            _ = kill_rx => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
+        }
+        let mut guard = map.lock().await;
+        if guard.get(&name).map(|m| m.id) == Some(id) {
+            guard.remove(&name);
+        }
+    });
+
+    Ok(())
+}
+
+/// Stop a runtime AKA started — fires its kill channel; the wait-task SIGKILLs
+/// the child and clears the slot. Returns false if AKA wasn't managing it.
+#[tauri::command]
+pub async fn stop_runtime(
+    launcher: State<'_, RuntimeLauncher>,
+    name: String,
+) -> Result<bool, String> {
+    let managed = {
+        let mut guard = launcher.map.lock().await;
+        guard.remove(&name)
+    };
+    match managed {
+        Some(m) => {
+            let _ = m.kill.send(());
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 #[tauri::command]

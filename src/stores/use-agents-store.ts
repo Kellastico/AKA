@@ -28,6 +28,8 @@ export type Agent = {
    * "aka" → ÄKÄ orchestrates the LLM and can switch models per-message.
    */
   llmOwnership: LLMOwnership;
+  /** Tool names this agent provides itself; mirrored into config.agent on select. */
+  providesTools: string[];
 };
 
 const CUSTOM_AGENT: Agent = {
@@ -40,6 +42,7 @@ const CUSTOM_AGENT: Agent = {
   install: null,
   installed: true,
   llmOwnership: "aka",
+  providesTools: [],
 };
 
 type AgentsState = {
@@ -83,6 +86,7 @@ function fromCustomAgent(c: CustomAgent, detected?: DetectedAgent): Agent {
     installed: detected?.installed ?? true,
     version: detected?.version ?? null,
     llmOwnership: c.llmOwnership,
+    providesTools: c.providesTools ?? [],
   };
 }
 
@@ -159,6 +163,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       name: a.name,
       bin: a.bin,
       args: a.args,
+      provides_tools: a.providesTools,
     });
   },
   hydrateFromProject: (bin) => {

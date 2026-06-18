@@ -23,6 +23,26 @@ const QUESTION_IDLE: Duration = Duration::from_millis(400);
 /// Don't treat an absurdly long unterminated line as a prompt (progress spew).
 const MAX_PROMPT_LEN: usize = 400;
 
+/// PATH list separator for the platform (used when prepending the shim dir).
+#[cfg(windows)]
+const PATH_SEP: char = ';';
+#[cfg(not(windows))]
+const PATH_SEP: char = ':';
+
+/// Directory holding the `aka-tool` shim. It sits next to the app binary in both
+/// dev (`target/debug`) and a bundled install, so the app's own exe dir is the
+/// answer; `AKA_TOOL_DIR` overrides for unusual layouts. Prepending this to a
+/// spawned agent's PATH is what lets any shell-capable agent call AKA's built-in
+/// tools (e.g. `aka-tool diagnostics`) while its own same-named tools still win.
+fn aka_tool_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("AKA_TOOL_DIR") {
+        if !dir.trim().is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
+}
+
 /// Result of probing a single user-registered agent binary on PATH. AKA ships
 /// no agent catalog — the caller supplies the bins to probe (the user's saved
 /// agents), and we only report whether each is present and its version.
@@ -438,6 +458,36 @@ pub async fn run_agent(
         "OPENAI_API_KEY".into(),
         if api_key.is_empty() { "nokey".into() } else { api_key.clone() },
     );
+
+    // Put the `aka-tool` shim on the agent's PATH so any agent that can run a
+    // shell command can reach AKA's built-in tools. Prepended for discoverability;
+    // an agent's own same-named tool still shadows it inside the agent's loop.
+    if let Some(dir) = aka_tool_dir() {
+        let dir = dir.to_string_lossy().into_owned();
+        let combined = match env.get("PATH") {
+            Some(existing) if !existing.is_empty() => format!("{dir}{PATH_SEP}{existing}"),
+            _ => dir,
+        };
+        env.insert("PATH".into(), combined);
+    }
+
+    // Advertise AKA's built-in tool pantry for this run (overridable + agnostic),
+    // honoring the project's advertise/gap-fill mode and the agent's declared
+    // tools. AKA-aware agents read `AKA_TOOLS`; instruction-reading agents can
+    // pick up `.äkä/TOOLS.md`. Both are skipped when the pantry is disabled or
+    // the effective set is empty (e.g. gap-fill with everything declared).
+    let manifest =
+        crate::tools::build_manifest(&agent.provides_tools, &cfg.tools.mode, cfg.tools.enabled);
+    if manifest.enabled && !manifest.tools.is_empty() {
+        if let Ok(json) = serde_json::to_string(&manifest) {
+            env.insert("AKA_TOOLS".into(), json);
+        }
+        let md_path = PathBuf::from(&project_path).join(".äkä").join("TOOLS.md");
+        if let Some(parent) = md_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&md_path, crate::tools::render_tools_md(&manifest)).await;
+    }
 
     let run_id = run_id.unwrap_or_else(|| {
         let nanos = SystemTime::now()

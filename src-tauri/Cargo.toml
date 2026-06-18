@@ -1,8 +1,11 @@
 [package]
 name = "aka"
-version = "1.1.0"
+version = "1.2.0"
 description = "AKA — local-first agentic coder desktop app"
 edition = "2021"
+# Two binaries live in this crate (the app `aka` + the `aka-tool` shim). Pin the
+# default so `tauri build` bundles the app, not the shim.
+default-run = "aka"
 
 [lib]
 name = "aka_lib"
@@ -29,6 +32,7 @@ libloading = "0.8"
 tracing = "0.1"
 fs2 = "0.4"
 portable-pty = "0.8"
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

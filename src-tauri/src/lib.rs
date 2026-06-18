@@ -4,6 +4,7 @@ mod hardware;
 mod path_env;
 mod sandbox;
 mod sidecar;
+pub mod tools;
 
 use std::sync::Mutex;
 
@@ -24,6 +25,7 @@ pub fn run() {
         .manage(commands::dev_server::DevServerState::default())
         .manage(commands::files::WatcherState::default())
         .manage(commands::llm::LlmStreamState::default())
+        .manage(commands::llm::RuntimeLauncher::default())
         .manage(commands::shell_run::ShellRunnerState::default())
         .manage(commands::models::DownloadState::default())
         .manage(sandbox::SandboxState::default())
@@ -62,6 +64,8 @@ pub fn run() {
             commands::llm::call_llm,
             commands::llm::call_llm_stream,
             commands::llm::stop_llm_stream,
+            commands::llm::start_runtime,
+            commands::llm::stop_runtime,
             commands::llm::summarize_session,
             commands::project_config::load_config,
             commands::project_config::save_config,
@@ -106,6 +110,7 @@ pub fn run() {
             sandbox::current_sandbox,
             sandbox::request_path_access,
             sandbox::apply_diff,
+            tools::tool_manifest,
         ])
         .build(tauri::generate_context!())
         .expect("error while building AKA")

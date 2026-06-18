@@ -95,6 +95,8 @@ export function ChatBoxFooter({ compact }: { compact: boolean }) {
         <AgentPicker compact={compact} />
         <ModePicker compact={compact} />
         <AttachButton compact={compact} />
+        {/* Tools indicator intentionally hidden for now — see ToolsIndicator.tsx
+            (kept for a future treatment). Tools stay wired via tool_manifest. */}
       </div>
       {thisSessionRunning ? (
         <div className="flex shrink-0 items-center gap-1.5">

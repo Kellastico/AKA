@@ -9,11 +9,16 @@ import {
   Warning,
 } from "@phosphor-icons/react";
 import { openExternalUrl } from "../../lib/tauri/commands";
-import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
+import {
+  RUNTIME_INSTALL_URLS,
+  runtimeSortRank,
+  useRuntimeStore,
+} from "../../features/01-llm-provider/use-runtime-store";
 import { useFirstRunStore } from "../../stores/use-first-run-store";
 
 /**
- * Auto-scans localhost for known LLM runtimes (Ollama, LM Studio, MLX). The
+ * Auto-scans localhost for known LLM runtimes (Ollama, LM Studio, llama.cpp,
+ * MLX, Jan). The
  * happy path is one click: detected runtime → connect → first model auto-
  * selected. Falls back to a manual URL input + "install Ollama" link when
  * nothing is running.
@@ -55,6 +60,10 @@ export function RuntimeStep() {
     if (!r.ok) setManualError(r.error ?? "Couldn't connect");
   };
 
+  // Show every known runtime, sorted running → installed → not-installed.
+  // Not-installed rows become dimmed "Install" links rather than being hidden.
+  const ranked = [...detected].sort((a, b) => runtimeSortRank(a) - runtimeSortRank(b));
+
   const canContinue = !!active && healthy && !!selectedModelId;
 
   return (
@@ -81,38 +90,56 @@ export function RuntimeStep() {
           </button>
         </div>
 
-        {detected.length === 0 && !detecting && (
+        {ranked.length === 0 && !detecting && (
           <EmptyDetected />
         )}
 
-        {detected.map((r) => {
+        {ranked.map((r) => {
           const isActive = active?.baseUrl === r.baseUrl;
+          const notInstalled = !r.healthy && !r.installed;
+          const installUrl = RUNTIME_INSTALL_URLS[r.name];
           return (
             <button
               key={r.baseUrl}
-              onClick={() => void selectDetected(r)}
+              onClick={() => {
+                if (notInstalled) {
+                  if (installUrl) void openExternalUrl(installUrl);
+                } else {
+                  void selectDetected(r);
+                }
+              }}
               className={[
                 "flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-colors",
                 isActive
                   ? "border-emerald-400/40 bg-emerald-400/8"
                   : "border-white/10 bg-white/[0.03] hover:border-white/25 hover:bg-white/[0.06]",
+                notInstalled ? "opacity-55" : "",
               ].join(" ")}
             >
               <div className="flex items-center gap-2.5">
-                <Cube size={18} weight="duotone" className="text-fuchsia-300/80" />
+                <Cube
+                  size={18}
+                  weight="duotone"
+                  className={notInstalled ? "text-white/30" : "text-fuchsia-300/80"}
+                />
                 <div className="flex flex-col">
                   <span className="text-sm font-medium">{r.name}</span>
                   <span className="font-mono text-[11px] text-white/45">
-                    {r.baseUrl}
+                    {notInstalled ? "Not installed" : r.baseUrl}
                   </span>
                 </div>
               </div>
-              {isActive && (
+              {isActive ? (
                 <span className="inline-flex items-center gap-1 text-[11px] text-emerald-300">
                   <Check size={11} weight="bold" />
                   Connected
                 </span>
-              )}
+              ) : notInstalled && installUrl ? (
+                <span className="inline-flex items-center gap-1 text-[11px] text-white/55">
+                  Install
+                  <ArrowSquareOut size={11} />
+                </span>
+              ) : null}
             </button>
           );
         })}

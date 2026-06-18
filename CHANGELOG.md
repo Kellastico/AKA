@@ -3,6 +3,41 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.2.0
+
+### Added
+- **Overridable built-in tools (the "pantry").** AKA now ships a small set of
+  built-in tools the agent can call through the bundled `aka-tool` CLI, placed
+  on the agent's PATH on every run. First tool: **`diagnostics`** — runs the
+  project's configured typecheck/lint (`agent.diagnostics_cmd`) and returns
+  structured `{file, line, severity, message}`. Fully agnostic and overridable:
+  the agent's own same-named tools always win, and AKA only fills the gaps.
+- **Per-agent capability declaration.** The agent editor gains a "Tools it
+  already provides" field; AKA honors those first and, in gap-fill mode, drops
+  them from what it advertises.
+- **Advertise vs gap-fill control** per project (`tools.mode` / `tools.enabled`),
+  with the manifest exported to agents via the `AKA_TOOLS` env var and a
+  generated `.äkä/TOOLS.md`.
+- **Tools indicator** in the chat bar showing how many built-in tools are
+  advertised and how many the active agent overrides.
+- **Smarter local-runtime detection.** AKA now detects which runtimes are
+  *installed* — not just running — by looking for each one's CLI binary or macOS
+  app bundle, searching beyond the process PATH (Homebrew, `~/.local/bin`, and
+  pip-user locations) so a Finder-launched app still finds them. Adds MLX
+  (`:8081`) and Jan (`:1337`) alongside Ollama, LM Studio, and llama.cpp, and the
+  connection and first-run panels now show only runtimes you actually have
+  (running, or installed but stopped), with "Connected / Installed but not
+  running" hints.
+
+### Fixed
+- **ANSI stripping no longer corrupts prose.** The escape-sequence regex now
+  requires an ESC prefix, so a bare `[0m`-style fragment inside legitimate text
+  (e.g. `arr[0m]`) is left intact instead of being deleted from the model's
+  reply. Fixed in both the agent-output noise parser and the SmallCode parser.
+
+### Removed
+- Unused legacy custom-agent modal (the inline agent panel is the only editor).
+
 ## 1.0.3
 
 ### Fixed

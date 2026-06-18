@@ -25,6 +25,14 @@ fn default_max_retries() -> u32 {
     DEFAULT_MAX_RETRIES
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_tools_mode() -> String {
+    "advertise".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeBlock {
     #[serde(default = "default_base_url")]
@@ -73,6 +81,17 @@ pub struct AgentBlock {
     pub args: Vec<String>,
     #[serde(default)]
     pub verify_cmd: String,
+    /// Command the `diagnostics` built-in tool runs (typecheck/lint). Config-
+    /// driven so it stays language-agnostic, mirroring `verify_cmd`. Empty = the
+    /// tool reports "not configured" instead of running anything.
+    #[serde(default)]
+    pub diagnostics_cmd: String,
+    /// Names of tools this agent already provides itself. AKA honors the agent's
+    /// own tools first: in `gapfill` mode these names are dropped from the
+    /// advertised manifest; in either mode they're reported as shadowed. Declared
+    /// by the user — the agent never self-claims. See the `tools` module.
+    #[serde(default)]
+    pub provides_tools: Vec<String>,
     #[serde(default)]
     pub dry_run_flags: Vec<String>,
 }
@@ -87,6 +106,31 @@ pub struct DevServerBlock {
     pub cmd: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// Project-level controls for AKA's built-in tool pantry (the overridable tool
+/// set). The shim binary is always on PATH; this only governs whether and how
+/// AKA *advertises* its tools to the agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsBlock {
+    /// Master switch. Off = advertise nothing and set no `AKA_TOOLS`/manifest
+    /// (the agent simply never hears about the pantry).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// "advertise" = offer every built-in (the agent's own same-named tool still
+    /// wins in its loop); "gapfill" = offer only names the agent didn't declare
+    /// in `agent.provides_tools`.
+    #[serde(default = "default_tools_mode")]
+    pub mode: String,
+}
+
+impl Default for ToolsBlock {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: default_tools_mode(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -111,6 +155,8 @@ pub struct ProjectConfig {
     pub sandbox: SandboxBlock,
     #[serde(default)]
     pub dev_server: DevServerBlock,
+    #[serde(default)]
+    pub tools: ToolsBlock,
     /// Optional custom Task Envelope template (the structured wrapper AKA builds
     /// around the user's raw prompt for agent runs). `None` = use the built-in
     /// default template; "Reset to default" sets it back to `None`. The template
@@ -129,6 +175,7 @@ impl Default for ProjectConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             sandbox: SandboxBlock::default(),
             dev_server: DevServerBlock::default(),
+            tools: ToolsBlock::default(),
             task_template: None,
         }
     }

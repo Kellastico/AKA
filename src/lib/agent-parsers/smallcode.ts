@@ -32,8 +32,10 @@ import { isNoise } from "./noise";
 // layer and reaches us as a literal Unicode replacement char (`◇` / `□`
 // / `�`) followed by the bracket sequence. Stripping both flavours
 // keeps the rendered prose clean even when SmallCode's coloured output
-// has been mangled in transit.
-const ANSI_RE = /(?:\x1b|[�◇□])?\[[0-9;]*m/g;
+// has been mangled in transit. The prefix is REQUIRED — without it, a
+// bare `[<digits>m` inside legitimate code/prose (`arr[0m]`) would be
+// stripped and corrupt the reply.
+const ANSI_RE = /(?:\x1b|[�◇□])\[[0-9;]*m/g;
 const stripAnsi = (s: string) => s.replace(ANSI_RE, "");
 
 const TOOL_START_RE = /^\s*⚙\s+(\S+)/;

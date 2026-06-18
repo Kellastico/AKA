@@ -55,6 +55,10 @@ type ProjectConfigState = {
   setMode: (mode: string) => Promise<void>;
   setVerifyCmd: (cmd: string) => Promise<void>;
   setMaxRetries: (n: number) => Promise<void>;
+  /** advertise ↔ gapfill for AKA's built-in tool pantry. */
+  setToolsMode: (mode: string) => Promise<void>;
+  /** Master switch for advertising AKA's built-in tools to the agent. */
+  setToolsEnabled: (enabled: boolean) => Promise<void>;
   // NOTE: The model-tuning fields (runtime.system_prompt / temperature / top_p /
   // vision, and task_template) are intentionally edited at the .äkä/config.json
   // level for now — there is deliberately no in-app setter/UI yet. The backend
@@ -308,6 +312,20 @@ export const useProjectConfigStore = create<ProjectConfigState>((set, get) => ({
     const { projectPath, config } = get();
     if (!projectPath || !config) return;
     const next = { ...config, max_retries: n };
+    await persist(set, projectPath, next);
+  },
+
+  setToolsMode: async (mode) => {
+    const { projectPath, config } = get();
+    if (!projectPath || !config) return;
+    const next = { ...config, tools: { ...config.tools, mode } };
+    await persist(set, projectPath, next);
+  },
+
+  setToolsEnabled: async (enabled) => {
+    const { projectPath, config } = get();
+    if (!projectPath || !config) return;
+    const next = { ...config, tools: { ...config.tools, enabled } };
     await persist(set, projectPath, next);
   },
 }));

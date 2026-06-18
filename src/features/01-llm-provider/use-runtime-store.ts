@@ -7,6 +7,8 @@ import {
   getSidecarStatus,
   listRuntimeModels,
   restartRuntime,
+  startRuntime as startRuntimeCmd,
+  stopRuntime as stopRuntimeCmd,
   type DetectedRuntime,
   type HardwareProfile,
   type SidecarStatusValue,
@@ -54,6 +56,29 @@ export function activeRuntimeName(s: RuntimeState): string | null {
   } catch {
     return "Custom";
   }
+}
+
+/**
+ * Where to send users to install each known runtime, keyed by the detected
+ * `name` from the backend probe list. A runtime with no entry simply shows no
+ * Install link. Paired with the `PROBES` list in `commands/llm.rs`.
+ */
+export const RUNTIME_INSTALL_URLS: Record<string, string> = {
+  Ollama: "https://ollama.com/download",
+  "LM Studio": "https://lmstudio.ai",
+  "llama.cpp": "https://github.com/ggml-org/llama.cpp",
+  MLX: "https://github.com/ml-explore/mlx-lm",
+  Jan: "https://jan.ai",
+};
+
+/**
+ * Sort priority for the detected-runtimes list: running first, then installed
+ * but stopped, then not-installed (Install-link rows) at the bottom.
+ */
+export function runtimeSortRank(r: DetectedRuntime): number {
+  if (r.healthy) return 0;
+  if (r.installed) return 1;
+  return 2;
 }
 
 export type RuntimeConfig = {
@@ -123,6 +148,10 @@ type RuntimeState = {
   /** User-initiated restart of the built-in runtime. */
   restartBuiltin: () => Promise<void>;
   selectDetected: (runtime: DetectedRuntime) => Promise<void>;
+  /** Boot a runtime AKA can launch (the Play button). */
+  startRuntime: (name: string) => Promise<void>;
+  /** Stop a runtime AKA started (the Stop button). */
+  stopRuntime: (name: string) => Promise<void>;
   saveManual: (baseUrl: string, apiKey: string | null) => Promise<{ ok: boolean; error?: string }>;
   selectModel: (modelId: string) => Promise<void>;
   /**
@@ -406,6 +435,36 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       // the previously-active runtime.
       set({ models: [], modelsError: null, selectedModelId: null });
     }
+  },
+
+  startRuntime: async (name) => {
+    try {
+      await startRuntimeCmd(name);
+    } catch (err) {
+      get().pushToast({
+        kind: "error",
+        text: `Couldn't start ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    get().pushToast({ kind: "info", text: `Starting ${name}…` });
+    // Pick up managed=true right away; the dot flips green on a later poll once
+    // the server's port answers.
+    await get().refreshDetection({ silent: true });
+  },
+
+  stopRuntime: async (name) => {
+    try {
+      await stopRuntimeCmd(name);
+    } catch (err) {
+      get().pushToast({
+        kind: "error",
+        text: `Couldn't stop ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    get().pushToast({ kind: "info", text: `Stopped ${name}` });
+    await get().refreshDetection({ silent: true });
   },
 
   saveManual: async (baseUrl, apiKey) => {

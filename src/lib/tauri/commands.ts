@@ -178,6 +178,10 @@ export type AgentBlock = {
   bin: string;
   args: string[];
   verify_cmd: string;
+  /** Command the `diagnostics` built-in tool runs (typecheck/lint). */
+  diagnostics_cmd: string;
+  /** Tool names this agent already provides; AKA honors these first. */
+  provides_tools: string[];
   dry_run_flags: string[];
 };
 
@@ -195,6 +199,33 @@ export type DevServerBlock = {
   args: string[];
 };
 
+/**
+ * Project controls for AKA's built-in tool pantry (the overridable tool set).
+ * The shim is always on PATH; this governs whether/how AKA advertises its tools.
+ */
+export type ToolsBlock = {
+  /** Master switch — off advertises nothing (no AKA_TOOLS / manifest). */
+  enabled: boolean;
+  /** "advertise" = offer all built-ins; "gapfill" = only names the agent lacks. */
+  mode: string;
+};
+
+/** One advertisable built-in tool, as returned by `tool_manifest`. */
+export type ToolSpec = {
+  name: string;
+  usage: string;
+  category: string;
+  kind: "passthrough" | "native";
+};
+
+/** The effective tool manifest for a project — advertised + shadowed. */
+export type ToolManifest = {
+  tools: ToolSpec[];
+  shadowed: string[];
+  mode: string;
+  enabled: boolean;
+};
+
 export type ProjectConfig = {
   runtime: RuntimeBlock;
   agent: AgentBlock;
@@ -202,6 +233,7 @@ export type ProjectConfig = {
   max_retries: number;
   sandbox: SandboxBlock;
   dev_server: DevServerBlock;
+  tools: ToolsBlock;
   /** Custom Task Envelope template; null = use the built-in default. */
   task_template?: string | null;
 };
@@ -221,6 +253,8 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     bin: "",
     args: [],
     verify_cmd: "",
+    diagnostics_cmd: "",
+    provides_tools: [],
     dry_run_flags: [],
   },
   mode: "agent",
@@ -232,6 +266,10 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     cmd: "",
     args: [],
   },
+  tools: {
+    enabled: true,
+    mode: "advertise",
+  },
   task_template: null,
 };
 
@@ -240,6 +278,18 @@ export async function loadConfig(projectPath: string): Promise<ProjectConfig> {
     return { ...DEFAULT_PROJECT_CONFIG, sandbox: { project_path: projectPath } };
   }
   return invoke<ProjectConfig>("load_config", { projectPath });
+}
+
+/**
+ * The effective built-in tool manifest for a project — advertised tools plus the
+ * names shadowed by the agent's own tools, honoring `tools.mode`. Drives the
+ * "N defaults overridden" indicator. Empty manifest outside Tauri.
+ */
+export async function toolManifest(projectPath: string): Promise<ToolManifest> {
+  if (!hasTauri()) {
+    return { tools: [], shadowed: [], mode: "advertise", enabled: true };
+  }
+  return invoke<ToolManifest>("tool_manifest", { projectPath });
 }
 
 export async function saveConfig(
@@ -531,7 +581,14 @@ export async function applyDiff(
 export type DetectedRuntime = {
   name: string;
   baseUrl: string;
+  /** Port responded to `GET /models` — running right now. */
   healthy: boolean;
+  /** Present on this machine (CLI binary or app bundle found), running or not. */
+  installed: boolean;
+  /** AKA started this runtime's server and can stop it (drives the Stop button). */
+  managed: boolean;
+  /** AKA knows how to boot this runtime headlessly (drives the Play button). */
+  launchable: boolean;
 };
 
 /**
@@ -551,6 +608,18 @@ export type ChatMessage = {
 export async function detectRuntimes(): Promise<DetectedRuntime[]> {
   if (!hasTauri()) return [];
   return invoke<DetectedRuntime[]>("detect_runtimes");
+}
+
+/** Boot a runtime AKA knows how to launch (Ollama, MLX). Throws on spawn failure. */
+export async function startRuntime(name: string): Promise<void> {
+  if (!hasTauri()) return;
+  await invoke("start_runtime", { name });
+}
+
+/** Stop a runtime AKA started. Resolves false if AKA wasn't managing it. */
+export async function stopRuntime(name: string): Promise<boolean> {
+  if (!hasTauri()) return false;
+  return invoke<boolean>("stop_runtime", { name });
 }
 
 export async function listRuntimeModels(

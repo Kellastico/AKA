@@ -35,8 +35,14 @@ const KV_FRAGMENT_RE =
   /^\s*(?:service|type|cause|status|directory|path|id|ref)=\S+(?:\s+(?:service|type|cause|status|directory|path|id|ref)=\S+)+\s*$/;
 
 /** ANSI SGR escape sequences — proper form AND the malformed form that
- * leaks through when the ESC byte gets remapped to a replacement char. */
-export const ANSI_RE = /(?:\x1b|[�◇□])?\[[0-9;]*m/g;
+ * leaks through when the ESC byte gets remapped to a replacement char.
+ *
+ * The prefix is REQUIRED: an ESC byte (`\x1b`) or one of the replacement
+ * chars it can decay into (`�◇□`) must precede the `[…m` for it to count
+ * as an SGR sequence. Making it optional would also strip bare `[<digits>m`
+ * out of legitimate prose (`arr[0m]` → `arr]`, `[3m` → ``), silently
+ * corrupting the model's reply. */
+export const ANSI_RE = /(?:\x1b|[�◇□])\[[0-9;]*m/g;
 
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");

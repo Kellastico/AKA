@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aka"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64 0.22.1",
  "fs2",
@@ -28,6 +28,7 @@ dependencies = [
  "libloading 0.8.9",
  "num_cpus",
  "portable-pty",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

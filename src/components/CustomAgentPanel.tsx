@@ -68,6 +68,7 @@ export function CustomAgentPanel({
   const [nameTouched, setNameTouched] = useState(false);
   const [ownership, setOwnership] = useState<LLMOwnership>("aka");
   const [ownershipTouched, setOwnershipTouched] = useState(false);
+  const [providesRaw, setProvidesRaw] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -93,12 +94,14 @@ export function CustomAgentPanel({
       setNameTouched(true);
       setOwnership(editing.llmOwnership);
       setOwnershipTouched(true);
+      setProvidesRaw((editing.providesTools ?? []).join(" "));
     } else {
       setCommand("");
       setName("");
       setNameTouched(false);
       setOwnership("aka");
       setOwnershipTouched(false);
+      setProvidesRaw("");
     }
     setErr(null);
     setBusy(false);
@@ -119,6 +122,12 @@ export function CustomAgentPanel({
     : hasModelPlaceholder(command)
       ? "aka"
       : "agent";
+
+  // Capability list — accept space-, comma-, or newline-separated tool names.
+  const parsedProvides = providesRaw
+    .split(/[\s,]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
 
   const commandError = submitted && !parsed.bin;
   const canSave = !!parsed.bin && !!effectiveName;
@@ -177,6 +186,7 @@ export function CustomAgentPanel({
         bin: parsed.bin,
         args: parsed.args,
         llmOwnership: effectiveOwnership,
+        providesTools: parsedProvides,
       };
       if (editing) {
         await update(editing.id, payload);
@@ -425,6 +435,19 @@ export function CustomAgentPanel({
               body="Your agent connects to the LLM itself. Model locks once the session starts."
             />
           </div>
+        </PanelField>
+
+        <PanelField
+          label="Tools it already provides"
+          hint="Optional. Tools this agent has itself (read_file, search, …). AKA honors these first — in gap-fill mode they're dropped from AKA's advertised built-ins. Space- or comma-separated."
+        >
+          <input
+            value={providesRaw}
+            onChange={(e) => setProvidesRaw(e.target.value)}
+            placeholder="read_file write_file search diagnostics"
+            spellCheck={false}
+            className={inputClass(false)}
+          />
         </PanelField>
 
         <PanelField label="Parsed">

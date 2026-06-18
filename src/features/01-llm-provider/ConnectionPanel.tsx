@@ -1,16 +1,22 @@
 import { useEffect, useState } from "react";
 import {
   ArrowsClockwise,
+  ArrowSquareOut,
   Cube,
+  Play,
   Plus,
   Plugs,
   PlugsConnected,
+  Stop,
 } from "@phosphor-icons/react";
 import {
   BUILTIN_RUNTIME_NAME,
   builtinEndpoint,
+  RUNTIME_INSTALL_URLS,
+  runtimeSortRank,
   useRuntimeStore,
 } from "./use-runtime-store";
+import { openExternalUrl } from "../../lib/tauri/commands";
 import type { DetectedRuntime, SidecarStatusValue } from "../../lib/tauri/commands";
 
 export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
@@ -19,6 +25,8 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
   const active = useRuntimeStore((s) => s.active);
   const refresh = useRuntimeStore((s) => s.refreshDetection);
   const selectDetected = useRuntimeStore((s) => s.selectDetected);
+  const startRuntime = useRuntimeStore((s) => s.startRuntime);
+  const stopRuntime = useRuntimeStore((s) => s.stopRuntime);
   const saveManual = useRuntimeStore((s) => s.saveManual);
 
   const builtinStatus = useRuntimeStore((s) => s.builtinStatus);
@@ -36,8 +44,12 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
   const [saving, setSaving] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
-  const noneHealthy = detected.length > 0 && detected.every((d) => !d.healthy);
-  const showEmptyHelper = !detecting && (detected.length === 0 || noneHealthy);
+  // Show every known runtime, sorted running → installed-but-stopped → not
+  // installed. Not-installed rows render as dimmed "Install" links (rather than
+  // being hidden), so users can discover and grab the ones they don't have.
+  const ranked = [...detected].sort((a, b) => runtimeSortRank(a) - runtimeSortRank(b));
+  const anyHealthy = detected.some((d) => d.healthy);
+  const showEmptyHelper = !detecting && detected.length > 0 && !anyHealthy;
 
   return (
     <div className="flex flex-col gap-3 px-1 py-1 text-white">
@@ -76,7 +88,7 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
       ) : null}
 
       <div className="flex flex-col gap-1">
-        {detected.map((r) => (
+        {ranked.map((r) => (
           <RuntimeRow
             key={r.baseUrl}
             runtime={r}
@@ -85,14 +97,28 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
               await selectDetected(r);
               onDone?.();
             }}
+            onStart={() => startRuntime(r.name)}
+            onStop={() => stopRuntime(r.name)}
+            installUrl={RUNTIME_INSTALL_URLS[r.name]}
           />
         ))}
       </div>
 
       {showEmptyHelper ? (
         <div className="mx-1 rounded-xl border border-white/10 bg-white/5 p-3 text-xs leading-relaxed text-white/70">
-          No LLM runtime detected. Start Ollama, LM Studio, or any
-          OpenAI-compatible server, then refresh.
+          {builtinStatus === "ready" ? (
+            <>
+              None of these are running — but the{" "}
+              <span className="font-medium text-white">ÄKÄ Built-in</span>{" "}
+              runtime above is ready to use with no setup. Or start a detected
+              runtime, or add a custom endpoint.
+            </>
+          ) : (
+            <>
+              Nothing's running yet. Start one of the runtimes above (or add a
+              custom endpoint below), then refresh.
+            </>
+          )}
         </div>
       ) : null}
 
@@ -247,7 +273,8 @@ function BuiltinRuntimeRow({
           </span>
         </span>
         <span className="truncate text-[10px] text-white/40">
-          {error ?? statusLabel(status)}
+          {error ??
+            (status === "ready" ? "Ready · no setup needed" : statusLabel(status))}
         </span>
       </button>
       <button
@@ -268,16 +295,53 @@ function RuntimeRow({
   runtime,
   active,
   onSelect,
+  onStart,
+  onStop,
+  installUrl,
 }: {
   runtime: DetectedRuntime;
   active: boolean;
   onSelect: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  installUrl?: string;
 }) {
+  // Not installed and not running → a dimmed, informational row with an Install
+  // link instead of a connect action.
+  if (!runtime.healthy && !runtime.installed) {
+    return (
+      <div className="flex w-full items-center gap-2 rounded-xl px-2 py-2 opacity-60">
+        <span
+          style={{ width: 8, height: 8 }}
+          className="inline-block shrink-0 rounded-full bg-white/20"
+        />
+        <Plugs size={14} className="text-white/30" />
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-xs text-white/70">{runtime.name}</span>
+          <span className="truncate text-[10px] text-white/35">Not installed</span>
+        </div>
+        {installUrl ? (
+          <button
+            onClick={() => void openExternalUrl(installUrl)}
+            title={`Install ${runtime.name}`}
+            className="ml-auto inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-white/60 hover:bg-white/10 hover:text-white"
+          >
+            Install
+            <ArrowSquareOut size={11} />
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  // Running or installed-but-stopped → a selectable row. When AKA can manage
+  // the process it also offers Play (boot) / Stop (kill).
+  const canPlay =
+    runtime.launchable && runtime.installed && !runtime.healthy && !runtime.managed;
   return (
-    <button
-      onClick={onSelect}
+    <div
       className={[
-        "flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition",
+        "group flex w-full items-center gap-2 rounded-xl px-2 py-2 transition",
         active ? "bg-white/15" : "hover:bg-white/10",
       ].join(" ")}
     >
@@ -287,11 +351,34 @@ function RuntimeRow({
       ) : (
         <Plugs size={14} className="text-white/40" />
       )}
-      <div className="flex min-w-0 flex-col">
+      <button
+        onClick={onSelect}
+        title={runtime.healthy ? "Connected — click to use" : "Installed but not running"}
+        className="flex min-w-0 flex-1 flex-col items-start text-left"
+      >
         <span className="truncate text-xs text-white">{runtime.name}</span>
-        <span className="truncate text-[10px] text-white/40">{runtime.baseUrl}</span>
-      </div>
-    </button>
+        <span className="truncate text-[10px] text-white/40">
+          {runtime.managed && !runtime.healthy ? "Starting…" : runtime.baseUrl}
+        </span>
+      </button>
+      {runtime.managed ? (
+        <button
+          onClick={onStop}
+          title={`Stop ${runtime.name} — shuts down the server AKA started`}
+          className="shrink-0 rounded-lg p-1 text-white/50 transition hover:bg-white/10 hover:text-red-300"
+        >
+          <Stop size={14} weight="fill" />
+        </button>
+      ) : canPlay ? (
+        <button
+          onClick={onStart}
+          title={`Start ${runtime.name} — boots the server in the background`}
+          className="shrink-0 rounded-lg p-1 text-white/50 opacity-0 transition hover:bg-white/10 hover:text-emerald-300 group-hover:opacity-100"
+        >
+          <Play size={14} weight="fill" />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
