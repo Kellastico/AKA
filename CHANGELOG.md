@@ -3,6 +3,15 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.2.1
+
+### Added
+- **Windows and Linux installers.** 1.2.0 shipped macOS-only — the release build
+  couldn't bundle the new `aka-tool` shim for non-macOS targets. CI now builds
+  the shim per target triple, so the Windows (`.exe` / `.msi`) and Linux
+  (`.AppImage` / `.deb` / `.rpm`) installers are published again. No app changes
+  from 1.2.0.
+
 ## 1.2.0
 
 ### Added
