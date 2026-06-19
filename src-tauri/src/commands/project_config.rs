@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::tools::phase::PhaseOverrides;
+use crate::tools::policy::Limits;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
 const DEFAULT_MODE: &str = "agent";
@@ -133,6 +135,62 @@ impl Default for ToolsBlock {
     }
 }
 
+fn default_git_approval() -> bool {
+    true
+}
+
+/// Per-project capability/privilege controls (the house layer's narrow-only knobs).
+/// Every default is the **deny/safe** value: no network egress, no exec, git
+/// approval-gated. A project may only *narrow* the deny-by-default baseline — these
+/// fields opt specific targets in; they can never widen a folder open. Unset in an
+/// existing config = full defaults (so old configs keep the safe posture).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesBlock {
+    /// Network destinations explicitly allowed (host, `host:port`, origin, or URL
+    /// prefix). Empty = no outbound egress permitted (cloud models included).
+    #[serde(default)]
+    pub network_allowlist: Vec<String>,
+    /// Process/tool names explicitly allowed to run under the `exec` folder.
+    /// Empty = no exec permitted.
+    #[serde(default)]
+    pub exec_allow: Vec<String>,
+    /// Whether `git`-folder actions require explicit user approval.
+    #[serde(default = "default_git_approval")]
+    pub git_requires_approval: bool,
+    /// Optional per-phase live-folder overrides, keyed by phase wire-name
+    /// (`"research"`, `"edit"`, …). `None` = use the built-in phase table.
+    #[serde(default)]
+    pub phase_overrides: Option<PhaseOverrides>,
+    /// Tool names for which a foreign agent's own implementation is allowed to win
+    /// over AKA's House built-in (PATH-style shadowing override). Empty = House
+    /// always wins.
+    #[serde(default)]
+    pub tool_overrides: Vec<String>,
+}
+
+impl Default for CapabilitiesBlock {
+    fn default() -> Self {
+        Self {
+            network_allowlist: Vec::new(),
+            exec_allow: Vec::new(),
+            git_requires_approval: true,
+            phase_overrides: None,
+            tool_overrides: Vec::new(),
+        }
+    }
+}
+
+impl CapabilitiesBlock {
+    /// Distill the enforcement-relevant limits for the policy layer.
+    pub fn limits(&self) -> Limits {
+        Limits {
+            network_allowlist: self.network_allowlist.clone(),
+            exec_allow: self.exec_allow.clone(),
+            git_requires_approval: self.git_requires_approval,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SandboxBlock {
     /// Informational only — the active sandbox is set from the opened project
@@ -157,6 +215,8 @@ pub struct ProjectConfig {
     pub dev_server: DevServerBlock,
     #[serde(default)]
     pub tools: ToolsBlock,
+    #[serde(default)]
+    pub capabilities: CapabilitiesBlock,
     /// Optional custom Task Envelope template (the structured wrapper AKA builds
     /// around the user's raw prompt for agent runs). `None` = use the built-in
     /// default template; "Reset to default" sets it back to `None`. The template
@@ -176,6 +236,7 @@ impl Default for ProjectConfig {
             sandbox: SandboxBlock::default(),
             dev_server: DevServerBlock::default(),
             tools: ToolsBlock::default(),
+            capabilities: CapabilitiesBlock::default(),
             task_template: None,
         }
     }

@@ -210,11 +210,33 @@ export type ToolsBlock = {
   mode: string;
 };
 
+/**
+ * A capability "folder" — the privilege boundary a tool is routed/enforced under.
+ * Mirrors the Rust `Capability` enum; the vocabulary is shared with the agent.
+ */
+export type Capability =
+  | "fs_read"
+  | "fs_write"
+  | "search"
+  | "git"
+  | "network"
+  | "exec";
+
+/** Who provides a tool: AKA's House pantry, or a foreign (untrusted) Agent. */
+export type ToolOwner = "house" | "agent";
+
+/** A coding run phase — host-owned; gates which folders' tools the model sees. */
+export type Phase = "research" | "plan" | "edit" | "review" | "commit";
+
 /** One advertisable built-in tool, as returned by `tool_manifest`. */
 export type ToolSpec = {
   name: string;
   usage: string;
   category: string;
+  /** SHORT model-facing signpost (the only description shown to the model). */
+  model_desc: string;
+  /** Privilege boundary this tool lives in. */
+  folder: Capability;
   kind: "passthrough" | "native";
 };
 
@@ -226,6 +248,73 @@ export type ToolManifest = {
   enabled: boolean;
 };
 
+/**
+ * Standard MCP tool annotations — untrusted hints, retained for classification
+ * only, never the basis of an enforcement decision.
+ */
+export type McpAnnotations = {
+  readOnlyHint?: boolean | null;
+  destructiveHint?: boolean | null;
+  idempotentHint?: boolean | null;
+  openWorldHint?: boolean | null;
+};
+
+/** The default-deny rules for a folder (materialized for the policy layer). */
+export type ScopePolicy = {
+  folder: Capability;
+  denyByDefault: boolean;
+  requiresApproval: boolean;
+  projectScoped: boolean;
+  allowsWrite: boolean;
+  allowsEgress: boolean;
+  allowsExec: boolean;
+};
+
+/**
+ * One tool as the host knows it (host-facing). Everything but `modelDesc` is
+ * host-only — the model never sees a `ToolEntry`, only the `ModelTool` projection.
+ */
+export type ToolEntry = {
+  name: string;
+  folder: Capability;
+  modelDesc: string;
+  scopePolicy: ScopePolicy;
+  requiresApproval: boolean;
+  /** Provenance/content hash — forward hook for the Garden; never enforced on. */
+  sha256: string;
+  owner: ToolOwner;
+  annotations: McpAnnotations;
+};
+
+/** Host-facing registry view (full ToolEntry list). For the UI, not the model. */
+export type ToolRegistry = {
+  entries: ToolEntry[];
+};
+
+/** The entire surface the *model* is allowed to see for a tool. */
+export type ModelTool = {
+  name: string;
+  modelDesc: string;
+};
+
+/**
+ * Per-project capability/privilege controls (the house layer's narrow-only knobs).
+ * Every default is the deny/safe value; a project may only *narrow* the
+ * deny-by-default baseline, never widen a folder open.
+ */
+export type CapabilitiesBlock = {
+  /** Network destinations explicitly allowed; empty = no egress (cloud included). */
+  network_allowlist: string[];
+  /** Process/tool names allowed under the `exec` folder; empty = none. */
+  exec_allow: string[];
+  /** Whether `git`-folder actions require explicit user approval. */
+  git_requires_approval: boolean;
+  /** Optional per-phase live-folder overrides, keyed by phase name. */
+  phase_overrides?: Record<Phase, Capability[]> | null;
+  /** Tool names where a foreign agent's own impl may win over the House built-in. */
+  tool_overrides: string[];
+};
+
 export type ProjectConfig = {
   runtime: RuntimeBlock;
   agent: AgentBlock;
@@ -234,6 +323,7 @@ export type ProjectConfig = {
   sandbox: SandboxBlock;
   dev_server: DevServerBlock;
   tools: ToolsBlock;
+  capabilities: CapabilitiesBlock;
   /** Custom Task Envelope template; null = use the built-in default. */
   task_template?: string | null;
 };
@@ -269,6 +359,13 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
   tools: {
     enabled: true,
     mode: "advertise",
+  },
+  capabilities: {
+    network_allowlist: [],
+    exec_allow: [],
+    git_requires_approval: true,
+    phase_overrides: null,
+    tool_overrides: [],
   },
   task_template: null,
 };
@@ -574,6 +671,63 @@ export async function applyDiff(
   projectPath: string,
 ): Promise<void> {
   return invoke("apply_diff", { patch, projectPath });
+}
+
+/** An anchored string-replace edit request. */
+export type StrReplaceReq = {
+  /** Project-relative or absolute path to the file to edit. */
+  path: string;
+  /** Exact text to find — must be non-empty and match exactly once. */
+  oldStr: string;
+  /** Replacement text. */
+  newStr: string;
+};
+
+/** What `applyStrReplace` returns — enough to refresh and diff the file. */
+export type EditResult = {
+  path: string;
+  mtimeMs: number;
+  linesAdded: number;
+  linesRemoved: number;
+};
+
+/**
+ * Anchored, scope-checked, checkpoint-before-write file edit. Enforced
+ * identically for every agent: the path must resolve inside the active sandbox,
+ * the anchor must be non-empty and match exactly once, and the working tree is
+ * snapshotted (kind `"step"`, label "Before edit to …") before the write — so the
+ * edit is undoable via `restoreCheckpoint`. Rejects raise `AppError::EditConflict`
+ * (anchor empty/missing/ambiguous) or `SandboxViolation` (out of scope).
+ */
+export async function applyStrReplace(
+  projectPath: string,
+  runId: string,
+  req: StrReplaceReq,
+): Promise<EditResult> {
+  return invoke<EditResult>("apply_str_replace", { projectPath, runId, req });
+}
+
+/**
+ * Host-facing tool registry for a project — the full `ToolEntry` list (folder,
+ * owner, scope policy, sha256, annotations). For the UI; not the model-facing
+ * surface. Empty outside Tauri.
+ */
+export async function toolRegistry(projectPath: string): Promise<ToolRegistry> {
+  if (!hasTauri()) return { entries: [] };
+  return invoke<ToolRegistry>("tool_registry", { projectPath });
+}
+
+/**
+ * Model-facing tool surface for a phase — only name + `modelDesc` of tools whose
+ * folder is live in that phase, honoring `capabilities.phase_overrides`. The model
+ * never sees a tool from a folder that isn't live. Empty outside Tauri.
+ */
+export async function phaseTools(
+  projectPath: string,
+  phase: Phase,
+): Promise<ModelTool[]> {
+  if (!hasTauri()) return [];
+  return invoke<ModelTool[]>("phase_tools", { projectPath, phase });
 }
 
 // ---------- LLM runtime helpers ----------

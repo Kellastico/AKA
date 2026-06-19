@@ -3,9 +3,15 @@
 //! (feature #6). The catalog of tool *names* is shared with the `aka-tool` shim;
 //! see [`catalog`].
 
+pub mod capability;
 pub mod catalog;
+pub mod mcp;
+pub mod phase;
+pub mod policy;
+pub mod registry;
 
 use catalog::ToolSpec;
+use registry::ToolOwner;
 use serde::Serialize;
 
 /// PATH-style override resolution: the effective pantry is every built-in whose
@@ -27,6 +33,29 @@ pub fn shadowed_tools(declared: &[String]) -> Vec<&'static str> {
         .filter(|t| declared.iter().any(|d| d.eq_ignore_ascii_case(t.name)))
         .map(|t| t.name)
         .collect()
+}
+
+/// House-first shadow resolution for a name both a House built-in and a foreign
+/// agent provide (Task 6). The **house implementation wins** — scoped + enforced —
+/// shadowing the agent's own, UNLESS `.äkä/config.json` explicitly names that tool
+/// in `overrides`, in which case the agent-owned tool is allowed to win.
+///
+/// This inverts the manifest's gap-fill default (where the agent's tool wins by
+/// name) on purpose: a foreign, untrusted agent's tool must not silently displace
+/// a sandboxed House tool. `declared` is the agent's own tool names; a name not in
+/// `declared` has no conflict and trivially resolves to House.
+///
+/// Pure + total. The phase-2 MCP dispatch is the live consumer; landing it now
+/// pins the rule and keeps the existing native-agent manifest path untouched.
+pub fn house_first_winner(name: &str, declared: &[String], overrides: &[String]) -> ToolOwner {
+    let agent_provides = declared.iter().any(|d| d.eq_ignore_ascii_case(name));
+    let config_allows_agent = overrides.iter().any(|o| o.eq_ignore_ascii_case(name));
+    if agent_provides && config_allows_agent {
+        ToolOwner::Agent
+    } else {
+        // No conflict, or conflict resolved house-first (the default).
+        ToolOwner::House
+    }
 }
 
 /// The advertisable tool manifest for one run — what AKA tells the agent it can
@@ -103,6 +132,33 @@ pub async fn tool_manifest(project_path: String) -> Result<ToolManifest, String>
     ))
 }
 
+/// Host-facing view of the tool registry for a project — the full [`registry::
+/// ToolEntry`] list (folder, owner, scope policy, sha256, annotations). For the UI
+/// only; this is *not* the model-facing surface. Currently the House built-in
+/// pantry; foreign (Agent) tools join once the MCP transport lands (phase 2).
+#[tauri::command]
+pub async fn tool_registry(_project_path: String) -> Result<registry::Registry, String> {
+    Ok(registry::Registry::from_builtins())
+}
+
+/// Model-facing tool surface for a given phase — **only** name + `model_desc` of
+/// tools whose folder is live in that phase, honoring the project's optional
+/// `capabilities.phase_overrides`. This is the deterministic, host-owned routing
+/// the model is allowed to see.
+#[tauri::command]
+pub async fn phase_tools(
+    project_path: String,
+    phase: String,
+) -> Result<Vec<registry::ModelTool>, String> {
+    let cfg = crate::commands::project_config::load_from_disk(&project_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let ph = phase::Phase::parse(&phase).ok_or_else(|| format!("unknown phase: {phase}"))?;
+    let overrides = cfg.capabilities.phase_overrides.unwrap_or_default();
+    let reg = registry::Registry::from_builtins();
+    Ok(phase::model_tools_for_phase(&reg, ph, &overrides))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +233,25 @@ mod tests {
         let m = build_manifest(&[], "advertise", false);
         let md = render_tools_md(&m);
         assert!(md.contains("No AKA tools"));
+    }
+
+    #[test]
+    fn house_wins_unless_config_names_the_agent_tool() {
+        let declared = vec!["diagnostics".to_string()];
+        // No override → house wins even though the agent also provides it.
+        assert_eq!(
+            house_first_winner("diagnostics", &declared, &[]),
+            ToolOwner::House
+        );
+        // Config explicitly allows the agent's tool to win.
+        assert_eq!(
+            house_first_winner("diagnostics", &declared, &["diagnostics".to_string()]),
+            ToolOwner::Agent
+        );
+        // An override for a tool the agent doesn't even provide is a no-op → house.
+        assert_eq!(
+            house_first_winner("diagnostics", &[], &["diagnostics".to_string()]),
+            ToolOwner::House
+        );
     }
 }

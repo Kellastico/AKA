@@ -3,6 +3,50 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.3.0
+
+### Added
+- **Capability-folder tool organization (host-side enforcement core).** Every
+  tool AKA knows about is sorted into one of six capability "folders" —
+  `fs_read · fs_write · search · git · network · exec` — that define its privilege
+  boundary. A new host-side registry keeps a hard split between what the *model*
+  sees (a short signpost only) and what the host keeps (folder, scope policy,
+  owner, provenance hash, raw annotations).
+- **Per-folder default-deny enforcement.** The house layer enforces each folder's
+  policy regardless of what a tool claims: writes are blocked outside the project
+  root, `git` is approval-gated, and `network` / `exec` are deny-by-default
+  (allowlist / explicit opt-in). A tool's self-declared "read-only" hint classifies
+  it but never grants trust — if it tries to write out of scope, it's still blocked.
+- **Phase routing.** AKA computes which folders are "live" per phase
+  (research → plan → edit → review → commit) and exposes only the descriptions of
+  live-folder tools to the model, so it can't pick a tool from a folder it never
+  saw. Overridable per project.
+- **Anchored edits with checkpoint-before-write (`apply_str_replace`).** A safe edit
+  primitive enforced for every agent: the path must resolve inside the sandbox, the
+  anchor must be non-empty and match exactly once, and the working tree is
+  snapshotted before the write — so any edit is undoable, even from a
+  non-interactive agent.
+- **MCP annotation → folder mapping.** Standard MCP tool annotations
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) are mapped
+  to capability folders so a *foreign* agent's tool lands in the right privilege
+  bucket — untrusted by default. Annotations are retained for classification only,
+  never used for an enforcement decision. The live MCP transport and the
+  `capability-contract v1` handshake are scaffolded and staged for a follow-up.
+- **House-first tool shadowing.** When a foreign agent and AKA both provide a
+  same-named tool, AKA's sandboxed built-in wins unless `.äkä/config.json` explicitly
+  allows the agent's.
+- **Per-project `capabilities` config block** with deny-safe defaults
+  (`network_allowlist`, `exec_allow`, `git_requires_approval`, `phase_overrides`,
+  `tool_overrides`).
+
+### Changed
+- **Cloud is now an explicit network action (local-first hardening).** The built-in
+  runtime continues to bind loopback (`127.0.0.1`) only. A local/loopback model is
+  ungated as before; a *remote* model endpoint is treated as a `network` action — it
+  must be allowlisted (`capabilities.network_allowlist`) and is surfaced to the UI,
+  never a silent default. Cloud stays an optional adapter: with no connection, the
+  local path keeps working.
+
 ## 1.2.1
 
 ### Added

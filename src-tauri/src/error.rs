@@ -36,6 +36,19 @@ pub enum AppError {
     #[serde(rename_all = "camelCase")]
     ConfigCorrupted { reason: String },
 
+    /// An anchored `apply_str_replace` could not be applied safely — the anchor
+    /// was empty, missing, or ambiguous, or the target file was unreadable.
+    /// `reason` is a precise, actionable message (e.g. "anchor matched 3 times").
+    #[serde(rename_all = "camelCase")]
+    EditConflict { reason: String },
+
+    /// A cloud/remote LLM endpoint was called but isn't allowlisted. Egress is a
+    /// `network` action and deny-by-default; `url` is the blocked base URL so the
+    /// UI can offer "allow this endpoint" (add it to
+    /// `capabilities.network_allowlist`).
+    #[serde(rename_all = "camelCase")]
+    NetworkBlocked { url: String },
+
     /// `summarize_session` timed out, errored, or produced an empty body.
     SummarizationFailed,
 }
@@ -50,6 +63,16 @@ impl AppError {
             reason: reason.into(),
         }
     }
+
+    pub fn edit_conflict(reason: impl Into<String>) -> Self {
+        Self::EditConflict {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn network_blocked(url: impl Into<String>) -> Self {
+        Self::NetworkBlocked { url: url.into() }
+    }
 }
 
 impl std::fmt::Display for AppError {
@@ -63,6 +86,8 @@ impl std::fmt::Display for AppError {
             Self::VerifyCommandNotFound { cmd } => write!(f, "verify command not found: {cmd}"),
             Self::SandboxViolation { path } => write!(f, "blocked by sandbox: {path}"),
             Self::ConfigCorrupted { reason } => write!(f, "config corrupted: {reason}"),
+            Self::EditConflict { reason } => write!(f, "edit conflict: {reason}"),
+            Self::NetworkBlocked { url } => write!(f, "network egress blocked: {url}"),
             Self::SummarizationFailed => write!(f, "summarization failed"),
         }
     }

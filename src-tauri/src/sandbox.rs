@@ -306,6 +306,167 @@ pub async fn apply_diff(
     Ok(())
 }
 
+// ---------- apply_str_replace (anchored edit) ----------
+
+/// One anchored string-replace request from a tool. `old_str` is the anchor that
+/// must appear **exactly once** in the file; `new_str` replaces it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrReplace {
+    /// Project-relative or absolute path to the file to edit.
+    pub path: String,
+    /// The exact text to find (non-empty, must match exactly once).
+    pub old_str: String,
+    /// The replacement text.
+    pub new_str: String,
+}
+
+/// What `apply_str_replace` returns: enough for the UI to refresh and render a
+/// before/after diff (Monaco diffs the two contents client-side, so no server-side
+/// unified diff is needed). Line counts are best-effort.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditResult {
+    pub path: String,
+    pub mtime_ms: u128,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+}
+
+/// Why an anchored edit was rejected before any write happened. Maps to
+/// `AppError` at the command boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditError {
+    /// The target path resolved outside the project sandbox.
+    OutOfScope,
+    /// The target file does not exist / could not be read.
+    NoSuchFile,
+    /// The anchor was empty — too unsafe to apply (would match everywhere).
+    EmptyAnchor,
+    /// The anchor was not found in the file.
+    AnchorNotFound,
+    /// The anchor matched more than once — ambiguous, refuse to guess.
+    AnchorAmbiguous(usize),
+}
+
+impl EditError {
+    /// A precise, user-facing reason string.
+    pub fn reason(&self) -> String {
+        match self {
+            EditError::OutOfScope => "path is outside the project".into(),
+            EditError::NoSuchFile => "file not found".into(),
+            EditError::EmptyAnchor => "old_str is empty".into(),
+            EditError::AnchorNotFound => "old_str not found in file".into(),
+            EditError::AnchorAmbiguous(n) => {
+                format!("old_str matched {n} times — make it unique")
+            }
+        }
+    }
+}
+
+/// Pure core of an anchored edit: enforce **non-empty anchor** and **exactly-once
+/// match**, then replace the single occurrence. No IO — directly unit-testable.
+/// Returns the updated content plus best-effort `(lines_added, lines_removed)`.
+pub fn apply_str_replace_inner(
+    content: &str,
+    old_str: &str,
+    new_str: &str,
+) -> Result<(String, u32, u32), EditError> {
+    if old_str.is_empty() {
+        return Err(EditError::EmptyAnchor);
+    }
+    match content.matches(old_str).count() {
+        0 => return Err(EditError::AnchorNotFound),
+        1 => {}
+        n => return Err(EditError::AnchorAmbiguous(n)),
+    }
+    let updated = content.replacen(old_str, new_str, 1);
+    let lines_removed = old_str.split('\n').count() as u32;
+    let lines_added = new_str.split('\n').count() as u32;
+    Ok((updated, lines_added, lines_removed))
+}
+
+/// Anchored, scope-checked, checkpoint-before-write file edit. The host-side edit
+/// primitive enforced **identically for every agent** (AKA-native or foreign):
+///   1. resolve the path inside the active sandbox (else `OutOfScope`),
+///   2. read it (else `NoSuchFile`),
+///   3. require a non-empty anchor matching **exactly once**,
+///   4. snapshot the working tree (`create_checkpoint_inner`, kind `"step"`) so the
+///      edit is undoable even for a non-interactive agent,
+///   5. write the single replacement.
+#[tauri::command]
+pub async fn apply_str_replace(
+    app: AppHandle,
+    state: State<'_, SandboxState>,
+    checkpoints: State<'_, crate::commands::checkpoints::CheckpointState>,
+    project_path: String,
+    run_id: String,
+    req: StrReplace,
+) -> Result<EditResult, AppError> {
+    let sandbox = state
+        .require()
+        .await
+        .map_err(|_| AppError::sandbox(project_path.clone()))?;
+
+    // The caller-supplied project_path must be the active sandbox root.
+    assert_within_sandbox(Path::new(&project_path), &sandbox)?;
+    let project_root = resolve_canonical(Path::new(&project_path))
+        .map_err(|_| AppError::sandbox(project_path.clone()))?;
+    if project_root != sandbox.project_path {
+        return Err(AppError::sandbox(project_root.display().to_string()));
+    }
+
+    // Resolve the target (relative paths are project-root-relative) and scope it.
+    let target = if Path::new(&req.path).is_absolute() {
+        PathBuf::from(&req.path)
+    } else {
+        project_root.join(&req.path)
+    };
+    assert_within_sandbox(&target, &sandbox).map_err(|_| AppError::edit_conflict(EditError::OutOfScope.reason()))?;
+
+    let content = tokio::fs::read_to_string(&target)
+        .await
+        .map_err(|_| AppError::edit_conflict(EditError::NoSuchFile.reason()))?;
+
+    let (updated, lines_added, lines_removed) =
+        apply_str_replace_inner(&content, &req.old_str, &req.new_str)
+            .map_err(|e| AppError::edit_conflict(e.reason()))?;
+
+    // Snapshot before the write so the edit is undoable (best-effort, agnostic).
+    let file_label = target
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| req.path.clone());
+    let _ = crate::commands::checkpoints::create_checkpoint_inner(
+        &app,
+        checkpoints.inner(),
+        &project_path,
+        &run_id,
+        &format!("Before edit to {file_label}"),
+        "step",
+    )
+    .await;
+
+    tokio::fs::write(&target, updated.as_bytes())
+        .await
+        .map_err(|e| AppError::edit_conflict(format!("write failed: {e}")))?;
+
+    let mtime_ms = tokio::fs::metadata(&target)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    Ok(EditResult {
+        path: target.to_string_lossy().into_owned(),
+        mtime_ms,
+        lines_added,
+        lines_removed,
+    })
+}
+
 // ---------- Tests ----------
 
 #[cfg(test)]
@@ -343,5 +504,46 @@ mod tests {
         assert!(paths.contains(&"src/foo.rs".to_string()));
         assert!(paths.contains(&"new.txt".to_string()));
         assert!(!paths.iter().any(|p| p.contains("/dev/null")));
+    }
+
+    #[test]
+    fn str_replace_replaces_exactly_one() {
+        let (out, added, removed) =
+            apply_str_replace_inner("let x = 1;\nlet y = 2;\n", "let y = 2;", "let y = 3;").unwrap();
+        assert_eq!(out, "let x = 1;\nlet y = 3;\n");
+        assert_eq!((added, removed), (1, 1));
+    }
+
+    #[test]
+    fn str_replace_rejects_empty_anchor() {
+        assert_eq!(
+            apply_str_replace_inner("anything", "", "x"),
+            Err(EditError::EmptyAnchor)
+        );
+    }
+
+    #[test]
+    fn str_replace_rejects_missing_anchor() {
+        assert_eq!(
+            apply_str_replace_inner("hello world", "nope", "x"),
+            Err(EditError::AnchorNotFound)
+        );
+    }
+
+    #[test]
+    fn str_replace_rejects_ambiguous_anchor() {
+        // "foo" appears three times — refuse to guess which.
+        assert_eq!(
+            apply_str_replace_inner("foo foo foo", "foo", "bar"),
+            Err(EditError::AnchorAmbiguous(3))
+        );
+    }
+
+    #[test]
+    fn str_replace_multiline_counts() {
+        let (out, added, removed) =
+            apply_str_replace_inner("a\nOLD1\nOLD2\nb\n", "OLD1\nOLD2", "NEW").unwrap();
+        assert_eq!(out, "a\nNEW\nb\n");
+        assert_eq!((added, removed), (1, 2));
     }
 }

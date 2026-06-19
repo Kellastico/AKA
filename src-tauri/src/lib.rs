@@ -110,7 +110,10 @@ pub fn run() {
             sandbox::current_sandbox,
             sandbox::request_path_access,
             sandbox::apply_diff,
+            sandbox::apply_str_replace,
             tools::tool_manifest,
+            tools::tool_registry,
+            tools::phase_tools,
         ])
         .build(tauri::generate_context!())
         .expect("error while building AKA")

@@ -18,6 +18,61 @@ use crate::error::AppError;
 const EVT_LLM_CHUNK: &str = "llm://chunk";
 const EVT_LLM_DONE: &str = "llm://done";
 const EVT_LLM_ERROR: &str = "llm://error";
+/// Surfaced whenever AKA makes an outbound LLM call to a *non-loopback* endpoint
+/// — a `network` action, never a silent default (Task 8). `allowed:false` means
+/// the call was blocked (endpoint not in `capabilities.network_allowlist`).
+const EVT_NETWORK_EGRESS: &str = "network://egress";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkEgressPayload {
+    url: String,
+    host: String,
+    allowed: bool,
+}
+
+/// Gate an outbound LLM base URL as a `network` action (Task 8 — cloud is an
+/// optional adapter, never a dependency). Loopback (the local sidecar / local
+/// runtimes) is local-first and ungated. A remote endpoint must be allowlisted in
+/// `.äkä/config.json` (`capabilities.network_allowlist`); either way it is surfaced
+/// to the UI as a network action. Returns the blocked URL if denied so callers can
+/// fall back to a local runtime rather than hanging on the network.
+fn gate_egress(
+    app: &AppHandle,
+    base_url: &str,
+    caps: &crate::commands::project_config::CapabilitiesBlock,
+) -> Result<(), AppError> {
+    use crate::tools::policy::{host_of, network_egress, EgressDecision};
+    // Route through the same `Limits` the policy layer enforces, so cloud egress
+    // is governed by exactly the `network` deny-by-default rule, not a parallel one.
+    let limits = caps.limits();
+    match network_egress(base_url, &limits.network_allowlist) {
+        // Local-first path: never gated, never surfaced as a network action.
+        EgressDecision::Loopback => Ok(()),
+        EgressDecision::Allowlisted => {
+            let _ = app.emit(
+                EVT_NETWORK_EGRESS,
+                NetworkEgressPayload {
+                    url: base_url.to_string(),
+                    host: host_of(base_url).unwrap_or_default(),
+                    allowed: true,
+                },
+            );
+            Ok(())
+        }
+        EgressDecision::Denied => {
+            let _ = app.emit(
+                EVT_NETWORK_EGRESS,
+                NetworkEgressPayload {
+                    url: base_url.to_string(),
+                    host: host_of(base_url).unwrap_or_default(),
+                    allowed: false,
+                },
+            );
+            Err(AppError::network_blocked(base_url))
+        }
+    }
+}
 
 /// Cancellation flags for in-flight LLM streams, keyed by run id (the session
 /// that launched the stream). Each session streams independently: starting a
@@ -532,6 +587,7 @@ pub async fn check_runtime_health(
 /// switching a project's model or base URL takes effect immediately.
 #[tauri::command]
 pub async fn call_llm(
+    app: AppHandle,
     messages: Vec<Message>,
     project_path: String,
     model: Option<String>,
@@ -540,6 +596,8 @@ pub async fn call_llm(
         return Err(AppError::RuntimeOffline);
     }
     let cfg = load_from_disk(&project_path).await?;
+    // Cloud = a `network` action: loopback is ungated, remote must be allowlisted.
+    gate_egress(&app, &cfg.runtime.base_url, &cfg.capabilities)?;
     let runtime = cfg.runtime;
     let model_id = model.filter(|m| !m.is_empty()).unwrap_or(runtime.model);
     if model_id.is_empty() {
@@ -760,6 +818,9 @@ async fn run_stream(
     let cfg = load_from_disk(&project_path)
         .await
         .map_err(|e| format!("{e:?}"))?;
+    // Cloud egress is a `network` action (Task 8). Loopback is local-first and
+    // ungated; a remote endpoint must be allowlisted, and is surfaced either way.
+    gate_egress(app, &cfg.runtime.base_url, &cfg.capabilities).map_err(|e| e.to_string())?;
     let runtime = cfg.runtime;
     let model_id = model.filter(|m| !m.is_empty()).unwrap_or(runtime.model);
     if model_id.is_empty() {
