@@ -131,9 +131,11 @@ export function backfillSmallCodeTrace(message: Message): Message[] {
       }
       // tool_end with no pending start is dropped — happens when an
       // "✓ Edited <path>" line slipped past without a preceding ⚙.
-    } else {
+    } else if (event.type === "text") {
       textParts.push(event.text);
     }
+    // reasoning_* events never arise here (this backfill runs the SmallCode
+    // parser, which has no reasoning concept) — ignored for exhaustiveness.
   }
   if (pendingStart) {
     toolMessages.push(

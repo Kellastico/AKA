@@ -1,35 +1,7 @@
-import type { AgentEvent, AgentParser } from "./types";
+import type { AgentParser } from "./types";
 import { createSmallCodeParser } from "./smallcode";
+import { createReActParser } from "./react";
 import { createProtocolParser, isAkaMarker } from "./protocol";
-import { isNoise, stripAnsi } from "./noise";
-
-/**
- * Default parser for agents we don't yet have a specialised
- * implementation for (Aider, OpenCode, custom shell wrappers, …).
- *
- * It still passes through model prose unchanged, but drops the
- * structured-logger noise that some agents print to stdout/stderr —
- * `INFO <timestamp> service=…` lines, stack-trace frames, JSON error
- * envelopes, ANSI colour codes. Those are diagnostic artifacts; the
- * ErrorBanner surfaces the meaningful crash reason separately, so
- * leaving them in the message body just buries the user's actual
- * reply (or, on a crash, buries the ErrorBanner itself under a wall
- * of timestamps).
- */
-function createPassthroughParser(): AgentParser {
-  return {
-    feed: (line: string): AgentEvent[] => {
-      const stripped = stripAnsi(line);
-      if (isNoise(stripped)) return [];
-      // Drop pure-whitespace lines that result from stripping ANSI
-      // off a colour-reset-only fragment — they add empty padding to
-      // the message body for no reason.
-      if (stripped.trim().length === 0 && line.trim().length > 0) return [];
-      return [{ type: "text", text: stripped }];
-    },
-    flush: () => [],
-  };
-}
 
 /**
  * Route each line to `primary` when `routeToPrimary(line)` is true, else to
@@ -52,14 +24,18 @@ export function composeParsers(
 
 /**
  * The agent's own ("base") parser, chosen by binary basename. SmallCode has a
- * specialised glyph parser; everything else uses passthrough. The binary path
- * can be a bare name (`smallcode`) or an absolute path — we match the basename.
+ * specialised glyph parser; every other agent gets the ReAct parser, which
+ * stays dormant (pure passthrough) until it sees `Thought:` / `Action:` /
+ * `Observation:` scaffolding — so plain-prose agents are unaffected while
+ * ReAct agents (Änyä, Enyö-Änyä, any LlamaIndex `ReActAgent`) get structured
+ * reasoning + tool events. The binary path can be a bare name (`smallcode`)
+ * or an absolute path — we match the basename.
  */
 function baseParserForAgent(bin: string | null | undefined): AgentParser {
-  if (!bin) return createPassthroughParser();
+  if (!bin) return createReActParser();
   const base = bin.split(/[/\\]/).pop()?.toLowerCase() ?? "";
   if (base === "smallcode") return createSmallCodeParser();
-  return createPassthroughParser();
+  return createReActParser();
 }
 
 /**

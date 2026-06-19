@@ -9,14 +9,27 @@
  * Tools follow a start/end pairing — a tool_start spawns a "running"
  * ToolMessage, the matching tool_end flips it to done/failed.
  *
+ * Reasoning follows the same start/delta/end shape: a reasoning_start opens
+ * a "streaming" reasoning segment, reasoning_delta appends thinking text to
+ * it, and reasoning_end settles it. Each segment is its own node in the run
+ * timeline, so a ReAct agent's interleaved Thoughts read as discrete steps
+ * between tool calls instead of one undifferentiated blob.
+ *
  * Text events are residue: everything the parser didn't recognise as
- * structured tool activity. That's where the agent's natural-language
- * reply ends up.
+ * structured tool/reasoning activity. That's where the agent's final
+ * user-facing reply ends up.
  */
 export type ToolKind = "read" | "write" | "run" | "search";
 
 export type AgentEvent =
-  | { type: "tool_start"; name: string; kind: ToolKind; path?: string }
+  | {
+      type: "tool_start";
+      name: string;
+      kind: ToolKind;
+      path?: string;
+      /** Readable tool input (e.g. a ReAct `Action Input` JSON line). */
+      input?: string;
+    }
   | {
       type: "tool_end";
       ok: boolean;
@@ -26,6 +39,9 @@ export type AgentEvent =
       linesAdded?: number;
       linesRemoved?: number;
     }
+  | { type: "reasoning_start" }
+  | { type: "reasoning_delta"; text: string }
+  | { type: "reasoning_end" }
   | { type: "text"; text: string };
 
 /**

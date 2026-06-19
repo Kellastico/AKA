@@ -897,6 +897,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // checkpoint.
         let currentToolKind: string | null = null;
 
+        // Discrete reasoning segments (one per ReAct `Thought`) are inserted
+        // BEFORE the answer placeholder so they interleave chronologically with
+        // the tool rows — [reasoning₁, tool₁, reasoning₂, tool₂, …, answer] —
+        // instead of collapsing into one undifferentiated blob. `currentReasoningId`
+        // mirrors `currentToolMessageId`: the segment we're streaming into now.
+        let currentReasoningId: string | null = null;
+        const openReasoning = (): string => {
+          if (currentReasoningId) return currentReasoningId;
+          currentReasoningId = useMessagesStore.getState().addBefore(
+            placeholderId,
+            {
+              role: "reasoning",
+              content: "",
+              agentId: agentId || undefined,
+              modelId: modelId || undefined,
+              thinkingStartedAt: Date.now(),
+            },
+            ownerSessionId,
+          );
+          return currentReasoningId;
+        };
+        const appendReasoning = (text: string) => {
+          useMessagesStore
+            .getState()
+            .appendThinkingToMessage(openReasoning(), text, ownerSessionId);
+        };
+        const closeReasoning = () => {
+          if (!currentReasoningId) return;
+          useMessagesStore
+            .getState()
+            .patchMessage(
+              currentReasoningId,
+              { thinkingEndedAt: Date.now() },
+              ownerSessionId,
+            );
+          currentReasoningId = null;
+        };
+
         // Live tokens-per-second tracker for agent mode. We count the
         // characters that flow through text events (same char/4 heuristic as
         // Ask/Edit mode) and update the store every 500 ms.
@@ -923,7 +961,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const patch: Record<string, unknown> = {
             toolStatus: event.ok ? "done" : "failed",
           };
-          if (event.elapsedMs !== undefined) patch.toolElapsedMs = event.elapsedMs;
+          if (event.elapsedMs !== undefined) {
+            patch.toolElapsedMs = event.elapsedMs;
+          } else {
+            // Parsers like ReAct don't carry a per-tool `ms` — derive the
+            // settled duration from the start clock we stamped at tool_start
+            // (host-side arrival timing, the agnostic fallback).
+            const started = ownerMessages().find(
+              (m) => m.id === currentToolMessageId,
+            )?.toolStartedAt;
+            if (started !== undefined) patch.toolElapsedMs = Date.now() - started;
+          }
           if (event.preview !== undefined) patch.toolPreview = event.preview;
           if (event.path !== undefined) patch.toolPath = event.path;
           if (event.linesAdded !== undefined) patch.linesAdded = event.linesAdded;
@@ -966,10 +1014,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const events = eventParser.feed(e.payload.line);
               for (const event of events) {
                 if (event.type === "tool_start") {
+                  // A tool starting means the agent finished thinking out loud —
+                  // settle the open reasoning segment so it reads as a completed
+                  // step above this tool. The placeholder keeps `pendingSince`
+                  // set so the run reads as "running" until the final answer
+                  // streams; the run timeline shows live progress on the rail.
+                  closeReasoning();
                   // Insert tool rows BEFORE the final-answer placeholder so the
-                  // "Agent worked" accordion renders above the result, not below
-                  // it. The placeholder stays last and keeps the Thinking
-                  // indicator at the bottom until the answer streams in.
+                  // run timeline renders above the result, not below it. The
+                  // placeholder stays last and carries the final answer.
                   const toolId = store.addBefore(
                     placeholderId,
                     {
@@ -978,7 +1031,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       toolKind: event.kind,
                       toolName: event.name,
                       toolPath: event.path,
+                      toolInput: event.input,
                       toolStatus: "running",
+                      toolStartedAt: Date.now(),
                       agentId: agentId || undefined,
                       modelId: modelId || undefined,
                     },
@@ -995,6 +1050,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     thinkParser.inThink = true;
                     thinkParser.speculative = true;
                   }
+                } else if (event.type === "reasoning_start") {
+                  // Fresh Thought — settle any prior segment, then open a new
+                  // one. The placeholder keeps `pendingSince` (run stays
+                  // "running"); the live segment renders on the timeline rail.
+                  closeReasoning();
+                  openReasoning();
+                } else if (event.type === "reasoning_delta") {
+                  agentCharCount += event.text.length;
+                  appendReasoning(event.text + "\n");
+                } else if (event.type === "reasoning_end") {
+                  closeReasoning();
                 } else {
                   // text → count chars for TPS, then route through <think> parser
                   agentCharCount += event.text.length;
@@ -1105,11 +1171,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
               .attachErrorToMessage(placeholderId, asAppErrorSafe(err), ownerSessionId);
           }
         } finally {
-          // Drain the agent parser first — any tool still in-flight at
-          // process exit gets closed as failed so the row doesn't pulse
-          // forever.
+          // Drain the agent parser first — any tool/reasoning still in-flight
+          // at process exit gets settled so a row doesn't pulse or a timer
+          // tick forever.
           for (const event of eventParser.flush()) {
             if (event.type === "tool_end") applyToolEnd(event);
+            else if (event.type === "reasoning_delta") appendReasoning(event.text + "\n");
+            else if (event.type === "reasoning_end") closeReasoning();
             else if (event.type === "text") {
               routeThinkChunk(
                 placeholderId,
@@ -1119,6 +1187,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               );
             }
           }
+          // Belt-and-braces: settle any reasoning segment the flush didn't.
+          closeReasoning();
           // Then drain the <think> parser for any half-buffered tail.
           const { content, thinking, undoThinking } = flushThinkParser(
             thinkParser,

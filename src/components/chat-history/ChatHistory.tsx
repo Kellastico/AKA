@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "@phosphor-icons/react";
-import { useMessagesStore, type Message } from "../../stores/use-messages-store";
+import { useMessagesStore } from "../../stores/use-messages-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { MessageItem } from "./MessageItem";
-import { AgentActivityAccordion } from "./AgentActivityAccordion";
+import { RunTimeline } from "./RunTimeline";
+import { groupRunMessages, type RunGroup } from "./run-grouping";
 import { WelcomeHero } from "../chatbox/WelcomeHero";
 
 // Distance from bottom (in pixels) under which we still consider the user to
@@ -14,14 +15,6 @@ const STICKY_THRESHOLD_PX = 80;
 // this distance — comfortably clear of the sticky threshold so it doesn't
 // flicker on/off while reading near the bottom.
 const SCROLL_DOWN_THRESHOLD_PX = 220;
-
-/**
- * A "group" is either a single user/assistant message or a run of consecutive
- * tool messages that get collapsed into the AgentActivityAccordion.
- */
-type MessageGroup =
-  | { kind: "single"; message: Message; key: string }
-  | { kind: "tool-run"; messages: Message[]; key: string };
 
 export function ChatHistory() {
   const messages = useMessagesStore((s) => s.messages);
@@ -69,26 +62,9 @@ export function ChatHistory() {
     [messages],
   );
 
-  /**
-   * Group consecutive tool messages into accordion runs so they don't flood
-   * the chat thread. Non-tool messages stay as individual entries.
-   */
-  const groups = useMemo<MessageGroup[]>(() => {
-    const result: MessageGroup[] = [];
-    for (const m of messages) {
-      if (m.role === "tool") {
-        const last = result[result.length - 1];
-        if (last?.kind === "tool-run") {
-          last.messages.push(m);
-        } else {
-          result.push({ kind: "tool-run", messages: [m], key: `run-${m.id}` });
-        }
-      } else {
-        result.push({ kind: "single", message: m, key: m.id });
-      }
-    }
-    return result;
-  }, [messages]);
+  // Fold the flat list into render groups: agent runs (interleaved reasoning +
+  // tool + answer) become one RunTimeline; everything else stays standalone.
+  const groups = useMemo<RunGroup[]>(() => groupRunMessages(messages), [messages]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -117,8 +93,8 @@ export function ChatHistory() {
         ) : (
           <div className="flex min-w-0 flex-col gap-4">
             {groups.map((group) =>
-              group.kind === "tool-run" ? (
-                <AgentActivityAccordion key={group.key} messages={group.messages} />
+              group.kind === "run" ? (
+                <RunTimeline key={group.key} messages={group.messages} />
               ) : (
                 <MessageItem key={group.key} message={group.message} />
               ),

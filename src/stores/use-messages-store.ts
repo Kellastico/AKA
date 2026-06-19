@@ -3,7 +3,7 @@ import { load } from "@tauri-apps/plugin-store";
 import type { AppError } from "../lib/tauri/commands";
 import { backfillSession } from "../lib/agent-parsers/cleanup";
 
-export type MessageRole = "user" | "assistant" | "tool";
+export type MessageRole = "user" | "assistant" | "tool" | "reasoning";
 
 export type ToolKind = "write" | "read" | "run" | "search";
 
@@ -28,7 +28,13 @@ export type Message = {
   modelId?: string;
   /** Agent that produced this message or tool action. Set on assistant + tool messages. */
   agentId?: string;
-  /** Reasoning/thinking block stripped from <think>…</think> before the main content. */
+  /**
+   * Reasoning/thinking text. On an `assistant` message it's the block stripped
+   * from <think>…</think> before the main content. On a `reasoning` message
+   * (a discrete run-timeline segment — e.g. one ReAct `Thought`) it's the
+   * whole body, with `content` left empty. Pairs with thinking{Started,Ended}At
+   * for the per-segment duration + streaming/settled state.
+   */
   thinkingContent?: string;
   /** Structured error from the backend — rendered as an ErrorBanner inside the message. */
   error?: AppError;
@@ -63,11 +69,23 @@ export type Message = {
   /** Display name of the tool — e.g. "read_file", "patch", "bash". */
   toolName?: string;
   /**
+   * Readable tool input — e.g. a ReAct `Action Input` JSON line. Shown on the
+   * expanded tool node so the call's arguments are legible without leaking the
+   * raw `Action Input:` scaffolding into prose.
+   */
+  toolInput?: string;
+  /**
    * Live status. "running" shows a pulsing bullet; "done" shows ✓ in
    * the tool's accent colour; "failed" shows ✗ in red. Old tool messages
    * (pre-parser) default to "done" via the renderer.
    */
   toolStatus?: "running" | "done" | "failed";
+  /**
+   * Unix ms timestamp set when a tool row is created (status "running").
+   * Drives the live elapsed timer while the tool runs; once `toolElapsedMs`
+   * is known the settled duration takes over.
+   */
+  toolStartedAt?: number;
   /** Total time the tool took, in ms — rendered next to the row. */
   toolElapsedMs?: number;
   /**
@@ -167,9 +185,11 @@ type MessagesState = {
    */
   loadSession: (sessionId: string | null) => void;
   /**
-   * Flip any tool messages still marked "running" in a session to "failed".
-   * Safety net called when a run ends so a crashed/abandoned agent never
-   * leaves the "Agent is working" accordion spinning forever.
+   * Settle any still-live run activity in a session: tool rows marked
+   * "running" flip to "failed", and reasoning segments still streaming get
+   * their end-clock stamped. Safety net called when a run ends so a
+   * crashed/abandoned agent never leaves a tool spinning or a reasoning
+   * timer ticking forever.
    */
   closeRunningTools: (sessionId: string | null) => void;
   /** Drop a session's archived messages — call when a session is deleted. */
@@ -291,10 +311,21 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
             // A tool left "running" when the app closed is from a dead run —
             // no stream survives a reload. Close it so the "Agent is working"
             // accordion doesn't spin forever on stale history.
-            const m2 =
+            let m2 =
               m.role === "tool" && m.toolStatus === "running"
                 ? { ...m, toolStatus: "failed" as const }
                 : m;
+            // Likewise a reasoning segment still "streaming" (started, never
+            // ended) is from a dead run — freeze its timer at the start so it
+            // can't tick forever. We don't know the real end, so 0s is the
+            // honest floor rather than an invented duration.
+            if (
+              m2.role === "reasoning" &&
+              m2.thinkingStartedAt !== undefined &&
+              m2.thinkingEndedAt === undefined
+            ) {
+              m2 = { ...m2, thinkingEndedAt: m2.thinkingStartedAt };
+            }
             if (m2.pendingSince === undefined) return m2;
             return {
               ...m2,
@@ -538,11 +569,19 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
   closeRunningTools: (sessionId) => {
     set((state) =>
       applyToSession(state, sessionId, (msgs) =>
-        msgs.map((m) =>
-          m.role === "tool" && m.toolStatus === "running"
-            ? { ...m, toolStatus: "failed" as const }
-            : m,
-        ),
+        msgs.map((m) => {
+          if (m.role === "tool" && m.toolStatus === "running") {
+            return { ...m, toolStatus: "failed" as const };
+          }
+          if (
+            m.role === "reasoning" &&
+            m.thinkingStartedAt !== undefined &&
+            m.thinkingEndedAt === undefined
+          ) {
+            return { ...m, thinkingEndedAt: Date.now() };
+          }
+          return m;
+        }),
       ),
     );
     schedulePersist();

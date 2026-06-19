@@ -3,6 +3,32 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.3.1
+
+### Changed
+- **Unified run timeline.** An agent run now renders as a single ordered timeline
+  where reasoning segments and tool calls interleave in the exact order they
+  happened — replacing the previous two disconnected accordions (all reasoning in
+  one, all tools in another). Each step is an individually collapsible node on a
+  vertical rail: reasoning shows a live streaming preview and settles to a snippet,
+  tools show a running state and settle to success/error with a result preview.
+- **Per-segment + total timing.** Every reasoning segment and every tool call shows
+  its own duration, and a run footer rolls up the total wall-clock, an approximate
+  token count, and run status (e.g. `7m 6s · 3.4k tokens · done`). Live timers tick
+  while a step runs and freeze the moment it settles.
+- **Copy on the final answer.** The agent's final reply has a Copy action that puts
+  the raw markdown on the clipboard, with inline "Copied" feedback.
+
+### Fixed
+- **ReAct scaffolding no longer leaks as prose.** `Thought:` / `Action:` /
+  `Action Input:` / `Observation:` output from ReAct-style agents (Änyä, Enyö-Änyä,
+  any LlamaIndex `ReActAgent`) is now parsed into structured reasoning + tool nodes
+  with readable input/output, instead of leaking raw into the reply text.
+- **Fonts are fully offline.** The three UI typefaces (Space Mono, Roboto Mono,
+  Averia Serif Libre) are now bundled as self-hosted WOFF2 files instead of being
+  fetched from the Google Fonts CDN — so typography is correct with no internet,
+  matching AKA's local-first promise.
+
 ## 1.3.0
 
 ### Added
