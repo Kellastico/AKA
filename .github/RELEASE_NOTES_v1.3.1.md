@@ -19,6 +19,10 @@ app's fonts are fully bundled, so it looks right with zero internet.
   raw markdown on your clipboard.
 
 ### 🔧 Fixed
+- **macOS "app is damaged" fixed.** The app bundle is now ad-hoc code-signed and
+  its resources + bundled sidecars are properly sealed, so macOS no longer reports
+  it as damaged/corrupted on launch. (Still unsigned by an Apple cert — first launch
+  is right-click → **Open**, or `xattr -dr com.apple.quarantine /Applications/AKA.app`.)
 - **No more ReAct scaffolding in the reply.** `Thought:` / `Action:` /
   `Action Input:` / `Observation:` output from ReAct-style agents is parsed into
   clean tool nodes with readable input/output, instead of leaking as raw prose.

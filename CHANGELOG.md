@@ -20,6 +20,11 @@ version stamped in `src-tauri/tauri.conf.json`.
   the raw markdown on the clipboard, with inline "Copied" feedback.
 
 ### Fixed
+- **macOS "app is damaged" on launch.** The bundle is now ad-hoc code-signed
+  (`signingIdentity: "-"`), which seals the app's resources and signs the bundled
+  `aka-runtime` / `aka-tool` sidecars. Previously only the main binary was
+  linker-signed and the bundle seal was missing, so macOS (especially Apple
+  Silicon) reported the app as damaged/corrupted both on download and locally.
 - **ReAct scaffolding no longer leaks as prose.** `Thought:` / `Action:` /
   `Action Input:` / `Observation:` output from ReAct-style agents (Änyä, Enyö-Änyä,
   any LlamaIndex `ReActAgent`) is now parsed into structured reasoning + tool nodes

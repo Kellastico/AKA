@@ -34,6 +34,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "externalBin": [
       "binaries/aka-runtime",
       "binaries/aka-tool"
