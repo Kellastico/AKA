@@ -33,7 +33,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "appimage", "app", "dmg", "updater", "nsis"],
+    "targets": "all",
     "externalBin": [
       "binaries/aka-runtime",
       "binaries/aka-tool"
