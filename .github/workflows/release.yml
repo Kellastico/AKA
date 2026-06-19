@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build all platforms for and attach assets to, e.g. v1.2.1. Builds the current main.'
+        required: true
 
 jobs:
   publish-tauri:
@@ -61,7 +66,7 @@ jobs:
         id: notes
         shell: bash
         run: |
-          FILE=".github/RELEASE_NOTES_${{ github.ref_name }}.md"
+          FILE=".github/RELEASE_NOTES_${{ github.event.inputs.tag || github.ref_name }}.md"
           {
             echo 'body<<RELEASE_NOTES_EOF'
             if [[ -f "$FILE" ]]; then cat "$FILE"; else echo "${{ github.ref_name }}"; fi
@@ -73,7 +78,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseBody: ${{ steps.notes.outputs.body }}
           args: ${{ matrix.args }}
