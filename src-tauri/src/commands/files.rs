@@ -152,7 +152,7 @@ pub async fn watch_file(
 ) -> Result<(), String> {
     // Replace any existing watcher on the same path.
     {
-        let mut map = state.inner.lock().unwrap();
+        let mut map = state.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(handle) = map.remove(&path) {
             handle.abort();
         }
@@ -187,7 +187,7 @@ pub async fn watch_file(
         }
     });
 
-    state.inner.lock().unwrap().insert(path, handle);
+    state.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(path, handle);
     Ok(())
 }
 
@@ -196,7 +196,7 @@ pub async fn unwatch_file(
     state: State<'_, WatcherState>,
     path: String,
 ) -> Result<(), String> {
-    if let Some(handle) = state.inner.lock().unwrap().remove(&path) {
+    if let Some(handle) = state.inner.lock().unwrap_or_else(|e| e.into_inner()).remove(&path) {
         handle.abort();
     }
     Ok(())
@@ -283,7 +283,7 @@ pub async fn watch_dir(
 ) -> Result<(), String> {
     let key = format!("dir:{}", path);
     {
-        let mut map = state.inner.lock().unwrap();
+        let mut map = state.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(handle) = map.remove(&key) {
             handle.abort();
         }
@@ -312,7 +312,7 @@ pub async fn watch_dir(
         }
     });
 
-    state.inner.lock().unwrap().insert(key, handle);
+    state.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(key, handle);
     Ok(())
 }
 
@@ -322,7 +322,7 @@ pub async fn unwatch_dir(
     path: String,
 ) -> Result<(), String> {
     let key = format!("dir:{}", path);
-    if let Some(handle) = state.inner.lock().unwrap().remove(&key) {
+    if let Some(handle) = state.inner.lock().unwrap_or_else(|e| e.into_inner()).remove(&key) {
         handle.abort();
     }
     Ok(())

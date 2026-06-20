@@ -293,7 +293,7 @@ async fn check_runtime_version(app: &AppHandle, port: u16) {
 
 fn set_status(app: &AppHandle, status: SidecarStatus) {
     let state = app.state::<Mutex<SidecarState>>();
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
     s.status = status;
 }
 
@@ -307,7 +307,7 @@ pub async fn spawn_sidecar(app: &AppHandle) -> Result<(), String> {
     if !port_is_free(PREFERRED_PORT) {
         let no_child = {
             let state = app.state::<Mutex<SidecarState>>();
-            let s = state.lock().unwrap();
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.child.is_none()
         };
         if no_child {
@@ -347,7 +347,7 @@ pub async fn spawn_sidecar(app: &AppHandle) -> Result<(), String> {
 
     let my_epoch = {
         let state = app.state::<Mutex<SidecarState>>();
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.epoch = s.epoch.wrapping_add(1);
         s.child = Some(child);
         s.port = port;
@@ -376,7 +376,7 @@ fn trigger_restart(app: &AppHandle) {
 /// `my_epoch` — i.e. the process death it just saw was expected.
 fn superseded(app: &AppHandle, my_epoch: u64) -> bool {
     let state = app.state::<Mutex<SidecarState>>();
-    let s = state.lock().unwrap();
+    let s = state.lock().unwrap_or_else(|e| e.into_inner());
     s.epoch != my_epoch
 }
 
@@ -455,7 +455,7 @@ async fn watch_sidecar(app: AppHandle, mut rx: Receiver<CommandEvent>, port: u16
 pub async fn restart_sidecar(app: &AppHandle) {
     {
         let state = app.state::<Mutex<SidecarState>>();
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         s.restart_stamps
             .retain(|t| now.duration_since(*t) < RESTART_WINDOW);
@@ -485,7 +485,7 @@ pub async fn restart_sidecar(app: &AppHandle) {
 /// so the watch task treats the death as expected and does not restart.
 pub fn shutdown(app: &AppHandle) {
     let state = app.state::<Mutex<SidecarState>>();
-    let mut s = state.lock().unwrap();
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
     s.epoch = s.epoch.wrapping_add(1);
     s.status = SidecarStatus::Stopped;
     if let Some(child) = s.child.take() {
@@ -497,7 +497,7 @@ pub fn shutdown(app: &AppHandle) {
 
 #[tauri::command]
 pub fn get_sidecar_status(state: State<Mutex<SidecarState>>) -> SidecarStatusDto {
-    let s = state.lock().unwrap();
+    let s = state.lock().unwrap_or_else(|e| e.into_inner());
     SidecarStatusDto::from_state(&s)
 }
 
@@ -505,7 +505,7 @@ pub fn get_sidecar_status(state: State<Mutex<SidecarState>>) -> SidecarStatusDto
 /// the port is never hardcoded there.
 #[tauri::command]
 pub fn get_sidecar_port(state: State<Mutex<SidecarState>>) -> Option<u16> {
-    let s = state.lock().unwrap();
+    let s = state.lock().unwrap_or_else(|e| e.into_inner());
     if s.port == 0 {
         None
     } else {
@@ -519,7 +519,7 @@ pub fn get_sidecar_port(state: State<Mutex<SidecarState>>) -> Option<u16> {
 pub async fn restart_runtime(app: AppHandle) -> Result<(), String> {
     {
         let state = app.state::<Mutex<SidecarState>>();
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.restart_stamps.clear();
         s.epoch = s.epoch.wrapping_add(1);
         s.status = SidecarStatus::Restarting;
@@ -540,7 +540,7 @@ pub async fn restart_runtime(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn abort_runtime(state: State<'_, Mutex<SidecarState>>) -> Result<bool, String> {
     let port = {
-        let s = state.lock().unwrap();
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.port == 0 {
             return Ok(false);
         }
@@ -572,7 +572,7 @@ pub async fn load_builtin_model(
     filename: String,
 ) -> Result<(), String> {
     let port = {
-        let s = state.lock().unwrap();
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.port == 0 {
             return Err("Built-in runtime is not running".into());
         }
@@ -607,7 +607,7 @@ pub async fn load_builtin_model(
 #[tauri::command]
 pub async fn unload_builtin_model(state: State<'_, Mutex<SidecarState>>) -> Result<(), String> {
     let port = {
-        let s = state.lock().unwrap();
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.port == 0 {
             return Ok(());
         }

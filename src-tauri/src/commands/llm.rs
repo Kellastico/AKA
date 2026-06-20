@@ -497,11 +497,51 @@ pub async fn start_runtime(
 
     let mut cmd = Command::new(&program);
     cmd.args(launch.args);
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    // Pipe stderr so a fast startup failure (bad args, missing model, port in
+    // use — e.g. mlx_lm.server can exit immediately) surfaces as an error
+    // instead of a silently dead row that never turns healthy.
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Couldn't start {name} ({}): {e}", launch.program))?;
+
+    // Give it a moment to fail fast. If it already exited, the launch failed —
+    // read what it logged and report that, rather than returning Ok and leaving
+    // a row that never goes green.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    if let Ok(Some(status)) = child.try_wait() {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            let _ = err.read_to_string(&mut buf).await;
+        }
+        let tail = buf
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" • ");
+        return Err(if tail.is_empty() {
+            format!("{name} exited on startup ({status}) — is it installed and a model available?")
+        } else {
+            format!("{name} exited on startup ({status}): {tail}")
+        });
+    }
+
+    // Survived startup. Drain stderr for the child's life so the piped buffer
+    // can never fill and block the server.
+    if let Some(mut err) = child.stderr.take() {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut sink = Vec::new();
+            let _ = err.read_to_end(&mut sink).await;
+        });
+    }
 
     let id = launcher.next_id.fetch_add(1, Ordering::SeqCst);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
