@@ -315,12 +315,13 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
               m.role === "tool" && m.toolStatus === "running"
                 ? { ...m, toolStatus: "failed" as const }
                 : m;
-            // Likewise a reasoning segment still "streaming" (started, never
-            // ended) is from a dead run — freeze its timer at the start so it
-            // can't tick forever. We don't know the real end, so 0s is the
-            // honest floor rather than an invented duration.
+            // Likewise any message still "thinking" (started, never ended) is
+            // from a dead run — freeze its timer at the start so it can't tick
+            // forever (e.g. a "Thinking 643m" badge after an overnight reload).
+            // This applies to reasoning rows AND legacy/prefill runs that parked
+            // their thinking on the assistant message. We don't know the real
+            // end, so 0s is the honest floor rather than an invented duration.
             if (
-              m2.role === "reasoning" &&
               m2.thinkingStartedAt !== undefined &&
               m2.thinkingEndedAt === undefined
             ) {

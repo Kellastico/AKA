@@ -423,6 +423,10 @@ function processThinkChunk(
       state.inThink = true;
     }
   }
+  // Drop stray OPEN think tags from reasoning: a prefill-think model starts
+  // already inside a think block, so a re-emitted `<think>`/`<thinking>` isn't
+  // consumed as a tag and would otherwise render literally in the accordion.
+  thinking = thinking.replace(/<think(?:ing)?>/gi, "");
   state.contentSinceClose += content.length;
   state.thinkingEmitted += thinking.length;
   return { content, thinking, reclaim, orphan };
@@ -935,6 +939,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
           currentReasoningId = null;
         };
 
+        // Route one parsed <think> chunk. Models with `<think>…</think>` tags get
+        // their reasoning interleaved as discrete segments BEFORE the answer —
+        // exactly like ReAct `Thought:` rows — so each thought renders above the
+        // tools it triggered instead of collapsing into one block under the
+        // result. Prefill-think models (DeepSeek-R1, Mellum-Thinking…) rely on
+        // the placeholder-based reclaim/undo dance to recover mis-speculated
+        // text, so they keep the legacy routing. `reclaim > 0` (an orphan close
+        // carrying body chars to recover) also falls back, since that recovery
+        // is defined against the placeholder body.
+        const interleaveThinking = !isPrefillThinkModel(modelId);
+        const routeText = (parsed: {
+          content: string;
+          thinking: string;
+          reclaim: number;
+          orphan?: boolean;
+        }) => {
+          if (!interleaveThinking || parsed.reclaim > 0) {
+            routeThinkChunk(placeholderId, parsed, ownerSessionId, modelId);
+            return;
+          }
+          if (parsed.orphan) markPrefillThinkModel(modelId);
+          // Thinking first (it precedes the close tag), then answer body — which
+          // settles the live reasoning segment so it reads as a finished step.
+          if (parsed.thinking) appendReasoning(parsed.thinking);
+          if (parsed.content) {
+            closeReasoning();
+            useMessagesStore
+              .getState()
+              .appendToMessage(placeholderId, parsed.content, ownerSessionId);
+          }
+        };
+
         // Live tokens-per-second tracker for agent mode. We count the
         // characters that flow through text events (same char/4 heuristic as
         // Ask/Edit mode) and update the store every 500 ms.
@@ -947,6 +983,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
             setTps(Math.round(agentCharCount / 4 / elapsedSec));
           }
         }, 500);
+
+        // Stuck-agent watchdog. Agents stream reasoning/tool events continuously
+        // while working, so total silence for a long stretch means the process
+        // is wedged — a model that bailed without exiting, or a hung tool. The
+        // agent path (unlike the LLM path) has no built-in timeout, so a bailed
+        // run would otherwise pulse "working" and keep its Stop button forever
+        // until the user intervened. On a stall we kill the process and settle
+        // the UI: `detach` finalizes the bubble + closes any running tool rows,
+        // `clearRun` drops the active-run state. Skipped while the agent is
+        // legitimately blocked on an interactive question.
+        const AGENT_STUCK_MS = 180_000;
+        let lastAgentActivityAt = Date.now();
+        const agentWatchdog = setInterval(() => {
+          if (genOf(runKey) !== myGen) {
+            clearInterval(agentWatchdog);
+            return;
+          }
+          if (get().runs[runKey]?.pendingQuestion) {
+            lastAgentActivityAt = Date.now();
+            return;
+          }
+          if (Date.now() - lastAgentActivityAt < AGENT_STUCK_MS) return;
+          clearInterval(agentWatchdog);
+          void stopAgent(runKey);
+          detach();
+          clearRun();
+        }, 10_000);
 
         const applyToolEnd = (event: {
           ok: boolean;
@@ -1009,6 +1072,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               // a different runId and must not leak into this bubble.
               if (e.payload.runId !== runKey) return;
               if (genOf(runKey) !== myGen) return;
+              lastAgentActivityAt = Date.now(); // feed the stuck-agent watchdog
               const store = useMessagesStore.getState();
 
               const events = eventParser.feed(e.payload.line);
@@ -1082,7 +1146,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       );
                     }
                   }
-                  routeThinkChunk(placeholderId, parsed, ownerSessionId, modelId);
+                  routeText(parsed);
                 }
               }
             },
@@ -1179,30 +1243,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
             else if (event.type === "reasoning_delta") appendReasoning(event.text + "\n");
             else if (event.type === "reasoning_end") closeReasoning();
             else if (event.type === "text") {
-              routeThinkChunk(
-                placeholderId,
-                processThinkChunk(thinkParser, event.text + "\n"),
-                ownerSessionId,
-                modelId,
-              );
+              routeText(processThinkChunk(thinkParser, event.text + "\n"));
             }
           }
-          // Belt-and-braces: settle any reasoning segment the flush didn't.
-          closeReasoning();
-          // Then drain the <think> parser for any half-buffered tail.
+          // Drain the <think> parser for any half-buffered tail.
           const { content, thinking, undoThinking } = flushThinkParser(
             thinkParser,
             agentCleanExit,
           );
           const store = useMessagesStore.getState();
+          // `undoThinking` only fires for speculative prefill models, whose
+          // reasoning stayed on the placeholder — so it reclaims from there.
           if (undoThinking > 0)
             store.reclaimThinkingToContent(placeholderId, undoThinking, ownerSessionId);
+          if (thinking) {
+            // A trailing thought interleaves like the rest for tagged models;
+            // prefill models keep it on the placeholder.
+            if (interleaveThinking) appendReasoning(thinking);
+            else store.appendThinkingToMessage(placeholderId, thinking, ownerSessionId);
+          }
           if (content) store.appendToMessage(placeholderId, content, ownerSessionId);
-          if (thinking)
-            store.appendThinkingToMessage(placeholderId, thinking, ownerSessionId);
-          // Stop the agent TPS interval. Intentionally keep the last measured
-          // tokensPerSec value so users can read performance after the run.
+          // Belt-and-braces: settle any reasoning segment still open.
+          closeReasoning();
+          // If the run is over but the answer placeholder is still "pending"
+          // (the agent did all its work through tools and never streamed a prose
+          // reply, or the stream died), clear the flag so the run stops pulsing
+          // a live "Working…" indicator. A clean exit keeps whatever content
+          // exists as-is; a crash/cancel already wrote its marker in `catch`.
+          if (
+            ownerMessages().find((m) => m.id === placeholderId)?.pendingSince !==
+            undefined
+          ) {
+            store.patchMessage(placeholderId, { pendingSince: undefined }, ownerSessionId);
+          }
+          // Stop the agent TPS interval + stuck watchdog. Intentionally keep the
+          // last measured tokensPerSec value so users can read performance after
+          // the run.
           clearInterval(agentTpsInterval);
+          clearInterval(agentWatchdog);
 
           // Agent-agnostic "files touched": diff the run's prerun↔postrun
           // checkpoints and synthesize a tool row per changed file, so the
