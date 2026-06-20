@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CaretRight,
   Folder,
@@ -11,6 +11,7 @@ import {
   GitBranch,
 } from "@phosphor-icons/react";
 import { listDir, countLines, type DirEntry } from "../../lib/tauri/commands";
+import { useProjectWatch } from "../../lib/use-project-watch";
 import { useProjectsStore } from "../../stores/use-projects-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 
@@ -242,6 +243,11 @@ export function FilesContent() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [lineCounts, setLineCounts] = useState<Record<string, number | null>>({});
 
+  // Mirror the dir cache into a ref so the live-refresh callback can read which
+  // subdirs are currently expanded without re-subscribing the watcher.
+  const cacheRef = useRef(cache);
+  cacheRef.current = cache;
+
   useEffect(() => {
     setRootEntries(null);
     setRootError(null);
@@ -261,6 +267,36 @@ export function FilesContent() {
       alive = false;
     };
   }, [projectPath]);
+
+  // Live tree: when an agent (or the user) creates/edits/deletes anything under
+  // the project, re-read the root and every expanded subdir so the pane reflects
+  // disk instead of a stale snapshot. Line counts are dropped so visible rows
+  // recount — an edited file's size updates too. Debounced via the shared hook.
+  const refresh = useCallback(() => {
+    if (!projectPath) return;
+    listDir(projectPath)
+      .then(setRootEntries)
+      .catch((err) =>
+        setRootError(err instanceof Error ? err.message : String(err)),
+      );
+    for (const [path, st] of Object.entries(cacheRef.current)) {
+      if (!st.loaded) continue;
+      listDir(path)
+        .then((entries) =>
+          setCache((c) => ({
+            ...c,
+            [path]: { loaded: true, loading: false, error: null, entries },
+          })),
+        )
+        .catch(() => {
+          // A deleted expanded dir drops out of its parent's reload above;
+          // its stale cache entry is harmless, so swallow the read error.
+        });
+    }
+    setLineCounts({});
+  }, [projectPath]);
+
+  useProjectWatch(projectPath, refresh);
 
   const handleSelect = (path: string) => {
     setSelectedPath(path);

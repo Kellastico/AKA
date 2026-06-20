@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowClockwise,
   ArrowSquareOut,
@@ -18,9 +17,8 @@ import {
   clearWebviewCache,
   loadConfig,
   openExternalUrl,
-  unwatchDir,
-  watchDir,
 } from "../../lib/tauri/commands";
+import { useProjectWatch } from "../../lib/use-project-watch";
 import { findFix } from "../../lib/error-fixes";
 import { humanizeError, isPortInUseError } from "../../lib/humanize-error";
 import { runAutoFix } from "../../lib/run-auto-fix";
@@ -121,31 +119,10 @@ export function BrowserContent({
   // changes — whether the user edited it, an agent wrote it, or a build step
   // emitted it. This is what makes the pane feel like "it just updates,"
   // independent of whether the dev server has its own HMR. Only active while a
-  // URL is loaded so we never poll the disk for a blank preview.
-  useEffect(() => {
-    if (!projectPath || !url) return;
-    let unlisten: UnlistenFn | null = null;
-    let disposed = false;
-    let debounce: ReturnType<typeof setTimeout> | null = null;
-
-    void watchDir(projectPath);
-    void listen("project://changed", () => {
-      // Collapse a burst of writes (an agent touching many files, a save-all)
-      // into a single reload once things settle.
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => bumpPreviewReload(), 700);
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-
-    return () => {
-      disposed = true;
-      if (debounce) clearTimeout(debounce);
-      unlisten?.();
-      void unwatchDir(projectPath);
-    };
-  }, [projectPath, url, bumpPreviewReload]);
+  // URL is loaded (path=null otherwise) so we never poll the disk for a blank
+  // preview. The shared hook ref-counts the watcher so the Files pane can
+  // watch the same project without either pane's cleanup killing the other.
+  useProjectWatch(url ? projectPath : null, bumpPreviewReload, 700);
 
   // Auto-fill detected dev-server URL the first time we see one — but only
   // when the user hasn't typed/loaded their own URL yet (don't yank).
