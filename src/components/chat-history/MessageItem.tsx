@@ -26,6 +26,7 @@ import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { ErrorBanner } from "../ErrorBanner";
 import { Collapse } from "../Collapse";
 import { Markdown } from "./Markdown";
+import { CopyButton } from "./CopyButton";
 import { activeSummary, DiffStat } from "./tool-summary";
 
 const ATTACH_ICONS: Record<MessageAttachment["kind"], Icon> = {
@@ -85,7 +86,7 @@ export function MessageItem({ message }: { message: Message }) {
 
 function UserMessage({ message }: { message: Message }) {
   return (
-    <div className="flex min-w-0 flex-col items-end gap-1.5">
+    <div className="group flex min-w-0 flex-col items-end gap-1.5">
       {message.attachments && message.attachments.length > 0 && (
         <div className="flex max-w-[85%] flex-wrap justify-end gap-1">
           {message.attachments.map((a, i) => {
@@ -105,7 +106,17 @@ function UserMessage({ message }: { message: Message }) {
       <div className="max-w-[85%] whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-2xl rounded-tr-md border border-white/20 bg-blue-500/60 px-3 py-2 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_4px_20px_rgba(0,0,0,0.4)] backdrop-blur-3xl">
         {message.content}
       </div>
-      <span className="text-[10px] text-ink/40">{message.timestamp}</span>
+      {/* Copy the sent text (hover-revealed) + timestamp. */}
+      <div className="flex items-center gap-1">
+        {message.content.length > 0 && (
+          <CopyButton
+            text={message.content}
+            label={false}
+            className="opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+          />
+        )}
+        <span className="text-[10px] text-ink/40">{message.timestamp}</span>
+      </div>
     </div>
   );
 }
@@ -123,7 +134,7 @@ function AssistantMessage({ message }: { message: Message }) {
     message.thinkingEndedAt === undefined;
 
   return (
-    <div className="flex w-full min-w-0 flex-col items-start gap-1.5">
+    <div className="group flex w-full min-w-0 flex-col items-start gap-1.5">
       {message.thinkingContent && (
         <div className="w-full">
           <button
@@ -169,6 +180,11 @@ function AssistantMessage({ message }: { message: Message }) {
       {message.content && (
         <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-[13px] leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
           <Markdown>{message.content}</Markdown>
+        </div>
+      )}
+      {message.content.length > 0 && (
+        <div className="opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton text={message.content} className="border border-white/10" />
         </div>
       )}
       <MetaRow message={message} />

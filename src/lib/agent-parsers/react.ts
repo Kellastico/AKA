@@ -34,6 +34,17 @@ const ACTION_INPUT_RE = /^\s*Action\s*Input\s*:\s?(.*)$/i;
 const OBSERVATION_RE = /^\s*Observation\s*:\s?(.*)$/i;
 const ANSWER_RE = /^\s*(?:Final\s+)?Answer\s*:\s?(.*)$/i;
 
+/**
+ * Splits a line *before* each capitalised ReAct keyword so a model that writes
+ * the next step on the same line as its prose — e.g. "…list the files.Action:
+ * list_directory" — still parses cleanly instead of leaking the scaffolding
+ * into the reasoning. Capitalised + colon-terminated to avoid splitting
+ * ordinary prose; `Action Input` is listed before `Action` so the longer
+ * keyword wins. Applied only outside observations/answers (see `feed`), where
+ * keyword-like text is data, not structure.
+ */
+const SPLIT_RE = /(?=(?:Thought|Action\s*Input|Action|Observation|Final\s*Answer|Answer)\s*:)/;
+
 /** True when a (stripped) line opens any ReAct section. */
 export function isReActLine(line: string): boolean {
   const s = stripAnsi(line);
@@ -214,7 +225,33 @@ export function createReActParser(): AgentParser {
   };
 
   return {
-    feed: handle,
+    feed: (raw: string): AgentEvent[] => {
+      // Don't split inside an observation (tool output) or the final answer —
+      // there, "Action:"/"Thought:" are data, not new ReAct steps.
+      if (section === "observation" || section === "answer") return handle(raw);
+      const out: AgentEvent[] = [];
+      const segs = raw.split(SPLIT_RE).filter((s) => s.length > 0);
+      for (let i = 0; i < segs.length; i++) {
+        out.push(...handle(segs[i]));
+        // The moment a segment drops us into a data section, the rest of the
+        // line is that section's content — append it verbatim instead of
+        // re-parsing keyword-like text out of it. (Split is zero-width, so
+        // joining the tail reconstructs the original substring exactly.)
+        // `handle` mutates `section`, which TS can't see through the early
+        // guard above — cast back to the full union to re-check it.
+        const now = section as Section;
+        const rest = segs.slice(i + 1).join("");
+        if (now === "observation") {
+          obsBuf += rest;
+          break;
+        }
+        if (now === "answer") {
+          if (rest && !isNoise(rest)) out.push({ type: "text", text: rest });
+          break;
+        }
+      }
+      return out;
+    },
     flush: () => [...endTool(), ...endReasoning()],
   };
 }

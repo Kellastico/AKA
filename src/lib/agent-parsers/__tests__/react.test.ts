@@ -99,6 +99,44 @@ describe("createReActParser", () => {
     ]);
   });
 
+  it("catches an Action written mid-line after the Thought (no newline)", () => {
+    // Real-world: the model ends its reasoning and starts the Action on the
+    // same line — "…project structure.Action: list_directory".
+    const events = run([
+      "Thought: I'll list the files to see the project structure.Action: list_directory",
+      "Observation: 42 entries",
+      "Thought: done",
+      "Answer: there are 42 files",
+    ]);
+    expect(events).toEqual([
+      { type: "reasoning_start" },
+      { type: "reasoning_delta", text: "I'll list the files to see the project structure." },
+      { type: "reasoning_end" },
+      { type: "tool_start", name: "list_directory", kind: "search" },
+      { type: "tool_end", ok: true, preview: "42 entries" },
+      { type: "reasoning_start" },
+      { type: "reasoning_delta", text: "done" },
+      { type: "reasoning_end" },
+      { type: "text", text: "there are 42 files" },
+    ]);
+    // The tool carries a real name — not the generic "tool" fallback.
+    expect(events.find((e) => e.type === "tool_start")).toMatchObject({ name: "list_directory" });
+  });
+
+  it("does not split keyword-like text inside an observation", () => {
+    const events = run([
+      "Action: grep",
+      'Action Input: {"q":"x"}',
+      "Observation: match at App.tsx: dispatch(Action: RESET)",
+      "Answer: found it",
+    ]);
+    // The observation keeps its full text; no spurious tool/thought is created.
+    const tools = events.filter((e) => e.type === "tool_start");
+    expect(tools).toHaveLength(1);
+    const end = events.find((e) => e.type === "tool_end") as { preview?: string };
+    expect(end.preview).toContain("dispatch(Action: RESET)");
+  });
+
   it("closes a dangling Thought on flush", () => {
     expect(run(["Thought: thinking out loud"])).toEqual([
       { type: "reasoning_start" },

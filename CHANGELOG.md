@@ -3,6 +3,26 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.3.2
+
+### Changed
+- **Tool calls group under their reasoning.** In the run timeline, the tool
+  calls that follow a reasoning step now read as compact chips, and a run of
+  **3+ consecutive tool calls collapses into a single accordion** (e.g. "Read 3
+  files", "Ran 3 commands") instead of sprawling down the rail. One or two tools
+  stay inline. Expanding a group reveals the individual calls.
+- **Copy on both ends of a turn.** You can now copy your own sent message (an
+  icon button by its timestamp) as well as the agent's final reply — both with
+  inline "Copied" feedback. Applies to agent runs and plain chat replies.
+
+### Fixed
+- **Real tool names from ReAct output.** The ReAct parser now recognises an
+  `Action:` / `Observation:` keyword even when the model writes it mid-line
+  (no leading newline — e.g. "…list the files.Action: list_directory"), so tool
+  nodes show the real tool name instead of a generic "tool", and the scaffolding
+  no longer leaks into the reasoning text. Keyword-like text inside a tool's
+  observation output is left untouched.
+
 ## 1.3.1
 
 ### Changed

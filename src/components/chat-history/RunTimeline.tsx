@@ -8,16 +8,16 @@ import {
   Eye,
   TerminalWindow,
   MagnifyingGlass,
-  Copy,
-  Check,
   FileText,
   Warning,
+  Stack,
   type Icon,
 } from "@phosphor-icons/react";
 import type { Message, ToolKind } from "../../stores/use-messages-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { Collapse } from "../Collapse";
 import { Markdown } from "./Markdown";
+import { CopyButton } from "./CopyButton";
 import { fmtElapsed } from "./MessageItem";
 import { useTicker, fmtClock, approxTokens } from "./timeline-util";
 import { activeSummary, baseName, clampWords, DiffStat, rollupFiles } from "./tool-summary";
@@ -41,7 +41,7 @@ const FROST =
   "shadow-[0_4px_20px_rgba(255,255,255,0.04),inset_0_1px_0_rgba(255,255,255,0.15)]";
 
 /* ── timeline node view-model derived from the run's messages ── */
-type RunNode = { type: "reasoning" | "tool"; msg: Message; key: string };
+export type RunNode = { type: "reasoning" | "tool"; msg: Message; key: string };
 
 const isStreaming = (m: Message) =>
   m.thinkingStartedAt !== undefined && m.thinkingEndedAt === undefined;
@@ -56,6 +56,71 @@ function snippet(text: string | undefined, words = 14): string {
 function tailLines(text: string | undefined, n = 3): string {
   const lines = (text ?? "").trim().split("\n").filter((l) => l.trim());
   return lines.slice(-n).join("\n");
+}
+
+/**
+ * A rendered timeline row. Reasoning stands alone; a single/pair of tool calls
+ * after a Thought render as inline chips, but a *run* of 3+ consecutive tool
+ * calls collapses into one `tool-group` accordion so the timeline stays
+ * readable instead of sprawling.
+ */
+export type RenderItem =
+  | { kind: "reasoning"; msg: Message; key: string }
+  | { kind: "tool"; msg: Message; key: string }
+  | { kind: "tool-group"; msgs: Message[]; key: string };
+
+/** Group consecutive tool nodes; 3+ in a row become a single collapsible group. */
+export function clusterNodes(nodes: RunNode[]): RenderItem[] {
+  const items: RenderItem[] = [];
+  let i = 0;
+  while (i < nodes.length) {
+    if (nodes[i].type === "reasoning") {
+      items.push({ kind: "reasoning", msg: nodes[i].msg, key: nodes[i].key });
+      i++;
+      continue;
+    }
+    const tools: RunNode[] = [];
+    while (i < nodes.length && nodes[i].type === "tool") {
+      tools.push(nodes[i]);
+      i++;
+    }
+    if (tools.length > 2) {
+      items.push({
+        kind: "tool-group",
+        msgs: tools.map((t) => t.msg),
+        key: `grp-${tools[0].key}`,
+      });
+    } else {
+      for (const t of tools) items.push({ kind: "tool", msg: t.msg, key: t.key });
+    }
+  }
+  return items;
+}
+
+/** One-line summary for a collapsed tool group ("Ran 3 commands" / "5 tool calls"). */
+export function groupSummary(msgs: Message[]): string {
+  const n = msgs.length;
+  const kinds = new Set(msgs.map((m) => m.toolKind));
+  if (kinds.size === 1) {
+    switch (msgs[0].toolKind) {
+      case "write":
+        return `Edited ${n} files`;
+      case "read":
+        return `Read ${n} files`;
+      case "search":
+        return `Ran ${n} searches`;
+      case "run":
+        return `Ran ${n} commands`;
+    }
+  }
+  return `${n} tool calls`;
+}
+
+/** The most common tool kind in a group — drives its icon. */
+function dominantKind(msgs: Message[]): ToolKind {
+  const counts = {} as Record<ToolKind, number>;
+  for (const m of msgs) if (m.toolKind) counts[m.toolKind] = (counts[m.toolKind] ?? 0) + 1;
+  return (Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] as ToolKind) ?? "run";
 }
 
 /**
@@ -194,11 +259,13 @@ export function RunTimeline({ messages }: { messages: Message[] }) {
             className="pointer-events-none absolute bottom-3 left-[16px] top-3 w-px bg-white/12"
             aria-hidden
           />
-          {nodes.map((n) =>
-            n.type === "reasoning" ? (
-              <ReasoningNode key={n.key} msg={n.msg} />
+          {clusterNodes(nodes).map((item) =>
+            item.kind === "reasoning" ? (
+              <ReasoningNode key={item.key} msg={item.msg} />
+            ) : item.kind === "tool" ? (
+              <ToolNode key={item.key} msg={item.msg} />
             ) : (
-              <ToolNode key={n.key} msg={n.msg} />
+              <ToolGroup key={item.key} msgs={item.msgs} />
             ),
           )}
           {/* live tail when the model is working between visible nodes */}
@@ -281,8 +348,8 @@ function ReasoningNode({ msg }: { msg: Message }) {
   );
 }
 
-/* ── tool node ────────────────────────────────────────────────────────── */
-function ToolNode({ msg }: { msg: Message }) {
+/* ── tool node (compact chip — used inline and inside a tool group) ────── */
+function ToolNode({ msg, nested = false }: { msg: Message; nested?: boolean }) {
   const openDiffForFile = useWorkspaceStore((s) => s.openDiffForFile);
   const [open, setOpen] = useState(false);
   const running = msg.toolStatus === "running";
@@ -305,7 +372,7 @@ function ToolNode({ msg }: { msg: Message }) {
   const isDiffable = !!msg.toolPath && hasDiff;
 
   return (
-    <div className="relative flex gap-2.5 pl-1">
+    <div className={["relative flex gap-2.5", nested ? "pl-6" : "pl-1"].join(" ")}>
       <span className="relative z-10 mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
         {running ? (
           <span className={["h-2 w-2 animate-pulse rounded-full", accent.dot].join(" ")} />
@@ -367,13 +434,6 @@ function ToolNode({ msg }: { msg: Message }) {
           />
         </button>
 
-        {/* running preview line — the glanceable active summary */}
-        {running && (
-          <p className="mt-0.5 truncate px-1 text-[11px] text-ink/45">
-            {activeSummary(msg)}
-          </p>
-        )}
-
         <Collapse open={open}>
           <div className="mt-1 flex flex-col gap-1 rounded-lg border border-white/10 bg-ink/5 px-2.5 py-2 text-[11px]">
             {msg.toolInput && (
@@ -395,6 +455,71 @@ function ToolNode({ msg }: { msg: Message }) {
             {!msg.toolInput && !msg.toolPreview && (
               <span className="text-ink/40">No additional detail.</span>
             )}
+          </div>
+        </Collapse>
+      </div>
+    </div>
+  );
+}
+
+/* ── tool group (3+ consecutive tool calls collapse into one accordion) ── */
+function ToolGroup({ msgs }: { msgs: Message[] }) {
+  const [open, setOpen] = useState(false);
+  const anyRunning = msgs.some(isRunningTool);
+  const anyFailed = msgs.some((m) => m.toolStatus === "failed");
+  useTicker(anyRunning);
+
+  const kind = dominantKind(msgs);
+  const accent = TOOL_ACCENT[kind];
+  const starts = msgs
+    .map((m) => m.toolStartedAt)
+    .filter((x): x is number => x !== undefined);
+  const ends = msgs
+    .filter((m) => m.toolStartedAt !== undefined && m.toolElapsedMs !== undefined)
+    .map((m) => m.toolStartedAt! + m.toolElapsedMs!);
+  const earliest = starts.length ? Math.min(...starts) : undefined;
+  const latest = ends.length ? Math.max(...ends) : undefined;
+  const elapsed =
+    earliest === undefined
+      ? undefined
+      : Math.max(0, (anyRunning ? Date.now() : latest ?? Date.now()) - earliest);
+
+  return (
+    <div className="relative flex gap-2.5 pl-1">
+      <span className="relative z-10 mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
+        {anyRunning ? (
+          <span className={["h-2 w-2 animate-pulse rounded-full", accent.dot].join(" ")} />
+        ) : anyFailed ? (
+          <Warning size={12} weight="fill" className="text-amber-400" />
+        ) : (
+          <CheckCircle size={12} weight="fill" className={accent.text} />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[11.5px] text-ink/70 hover:bg-ink/5 hover:text-ink/90"
+        >
+          <Stack size={12} className="text-ink/50" />
+          <span className="min-w-0 flex-1 truncate font-medium">
+            {anyRunning ? `Running ${msgs.length} tools` : groupSummary(msgs)}
+          </span>
+          {elapsed !== undefined && (
+            <span className="shrink-0 tabular-nums text-[10px] text-ink/30">
+              {fmtElapsed(elapsed)}
+            </span>
+          )}
+          <CaretDown
+            size={9}
+            className={["shrink-0 transition-transform", open ? "rotate-180" : ""].join(" ")}
+          />
+        </button>
+        <Collapse open={open}>
+          <div className="mt-1 flex flex-col gap-1">
+            {msgs.map((m) => (
+              <ToolNode key={m.id} msg={m} nested />
+            ))}
           </div>
         </Collapse>
       </div>
@@ -440,36 +565,9 @@ function AnswerBlock({
       {/* hover-persistent action row */}
       {answer.content.length > 0 && (
         <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <CopyButton text={answer.content} />
+          <CopyButton text={answer.content} className="border border-white/10" />
         </div>
       )}
     </div>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard denied (no secure context) — leave the button unchanged.
-    }
-  };
-  return (
-    <button
-      onClick={onCopy}
-      aria-label={copied ? "Copied" : "Copy reply"}
-      className={[
-        "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]",
-        "border border-white/10 text-ink/55 hover:bg-ink/5 hover:text-ink/80",
-        copied ? "!opacity-100 text-emerald-300" : "",
-      ].join(" ")}
-    >
-      {copied ? <Check size={11} weight="bold" /> : <Copy size={11} />}
-      {copied ? "Copied" : "Copy"}
-    </button>
   );
 }
