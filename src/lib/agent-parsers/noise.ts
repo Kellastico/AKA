@@ -48,6 +48,30 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
 }
 
+/**
+ * Normalize terminal control bytes that agents leak into stdout (spinners,
+ * progress indicators, readline echo). Backspace (`\b`, 0x08) is *applied* —
+ * it deletes the preceding char the way a terminal would — so an artifact like
+ * `"D\b\b "` collapses to a space instead of rendering as ▯ boxes AND shoving
+ * real content (an `@@aka` marker, a `<think>` tag) off the line start where
+ * the parsers anchor their match. Remaining C0/DEL controls are dropped. ESC
+ * (0x1b), tab, newline and CR are preserved so ANSI stripping and line
+ * structure still work downstream.
+ */
+export function normalizeControl(s: string): string {
+  if (!/[\x00-\x08\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F]/.test(s)) return s;
+  let out = "";
+  for (const ch of s) {
+    if (ch === "\b") {
+      // Don't erase across a line break — clamp at the start of the line.
+      if (out.length && out[out.length - 1] !== "\n") out = out.slice(0, -1);
+      continue;
+    }
+    out += ch;
+  }
+  return out.replace(/[\x00-\x07\x0B\x0C\x0E-\x1A\x1C-\x1F\x7F]/g, "");
+}
+
 export function isNoise(line: string): boolean {
   if (STRUCTURED_LOG_RE.test(line)) return true;
   if (STACK_TRACE_RE.test(line)) return true;

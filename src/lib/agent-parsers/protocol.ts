@@ -44,6 +44,9 @@ function toKind(t: unknown): ToolKind {
 }
 
 type Marker = {
+  /** Handshake markers (`{"announce":"capability-contract",…}`) — not a tool
+   *  call. Consumed silently so the contract never shows as chat or a tool row. */
+  announce?: string;
   tool?: string;
   name?: string;
   path?: string;
@@ -66,6 +69,10 @@ export function createProtocolParser(): AgentParser {
       } catch {
         return []; // malformed marker — drop it, never throw or leak as prose
       }
+
+      // Capability-contract / handshake markers are control plane, not a tool
+      // call — consume them so the contract JSON never lands in the chat.
+      if (j.announce !== undefined) return [];
 
       const kind = toKind(j.tool);
       const name =

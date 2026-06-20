@@ -1,4 +1,5 @@
 import type { AgentParser } from "./types";
+import { normalizeControl } from "./noise";
 import { createSmallCodeParser } from "./smallcode";
 import { createReActParser } from "./react";
 import { createProtocolParser, isAkaMarker } from "./protocol";
@@ -16,8 +17,14 @@ export function composeParsers(
   routeToPrimary: (line: string) => boolean,
 ): AgentParser {
   return {
-    feed: (line) =>
-      routeToPrimary(line) ? primary.feed(line) : fallback.feed(line),
+    feed: (line) => {
+      // Normalize terminal control bytes (backspace spinners, etc.) ONCE here so
+      // both the routing decision and the chosen parser see a clean line — raw
+      // `\b` artifacts otherwise render as ▯ boxes and break line-anchored
+      // matches (`@@aka`, `Thought:`, `<think>`).
+      const clean = normalizeControl(line);
+      return routeToPrimary(clean) ? primary.feed(clean) : fallback.feed(clean);
+    },
     flush: () => [...primary.flush(), ...fallback.flush()],
   };
 }
