@@ -111,8 +111,7 @@ function UserMessage({ message }: { message: Message }) {
         {message.content.length > 0 && (
           <CopyButton
             text={message.content}
-            label={false}
-            className="opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+            className="border border-white/10 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
           />
         )}
         <span className="text-[10px] text-ink/40">{message.timestamp}</span>

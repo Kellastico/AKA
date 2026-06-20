@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  Gear,
   CheckCircle,
   CaretDown,
   Brain,
@@ -8,7 +7,6 @@ import {
   Eye,
   TerminalWindow,
   MagnifyingGlass,
-  FileText,
   Warning,
   Stack,
   type Icon,
@@ -20,7 +18,7 @@ import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
 import { fmtElapsed } from "./MessageItem";
 import { useTicker, fmtClock, approxTokens } from "./timeline-util";
-import { activeSummary, baseName, clampWords, DiffStat, rollupFiles } from "./tool-summary";
+import { baseName, DiffStat } from "./tool-summary";
 
 /* ── tool kind → icon + accent (matches the rest of the chat surface) ── */
 const TOOL_ICONS: Record<ToolKind, Icon> = {
@@ -36,27 +34,12 @@ const TOOL_ACCENT: Record<ToolKind, { dot: string; text: string }> = {
   search: { dot: "bg-fuchsia-400", text: "text-fuchsia-200" },
 };
 
-const FROST =
-  "border border-white/20 bg-white/12 backdrop-blur-xl " +
-  "shadow-[0_4px_20px_rgba(255,255,255,0.04),inset_0_1px_0_rgba(255,255,255,0.15)]";
-
 /* ── timeline node view-model derived from the run's messages ── */
 export type RunNode = { type: "reasoning" | "tool"; msg: Message; key: string };
 
 const isStreaming = (m: Message) =>
   m.thinkingStartedAt !== undefined && m.thinkingEndedAt === undefined;
 const isRunningTool = (m: Message) => m.toolStatus === "running";
-
-/** First non-empty line of a reasoning body, clamped for the collapsed snippet. */
-function snippet(text: string | undefined, words = 14): string {
-  const first = (text ?? "").trim().split("\n").find((l) => l.trim()) ?? "";
-  return clampWords(first, words);
-}
-/** Last few lines of a streaming reasoning body — the live "thinking" preview. */
-function tailLines(text: string | undefined, n = 3): string {
-  const lines = (text ?? "").trim().split("\n").filter((l) => l.trim());
-  return lines.slice(-n).join("\n");
-}
 
 /**
  * A rendered timeline row. Reasoning stands alone; a single/pair of tool calls
@@ -164,10 +147,6 @@ export function RunTimeline({ messages }: { messages: Message[] }) {
       ? "error"
       : "done";
 
-  // Whole-run collapse: live runs open so progress is visible; settled history
-  // mounts collapsed (like the old Reasoning accordion) to keep the thread calm.
-  const [open, setOpen] = useState(isRunning);
-
   useTicker(isRunning);
   const now = Date.now();
 
@@ -200,85 +179,34 @@ export function RunTimeline({ messages }: { messages: Message[] }) {
     ) +
     (answer?.content.length ?? 0);
 
-  const files = rollupFiles(toolMsgs);
-  const added = toolMsgs.reduce((s, m) => s + (m.linesAdded ?? 0), 0);
-  const removed = toolMsgs.reduce((s, m) => s + (m.linesRemoved ?? 0), 0);
-
-  // Header summary of the current action while running (glanceable, no expand).
-  const runningTool = [...toolMsgs].reverse().find(isRunningTool);
-  const liveLabel = runningTool
-    ? clampWords(activeSummary(runningTool))
-    : anyReasoningStreaming
-      ? "Thinking"
-      : "Working";
-
   return (
     <div className="flex w-full min-w-0 flex-col">
-      {/* ── run header — collapses the whole timeline ── */}
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] text-ink/45 hover:bg-ink/5 hover:text-ink/70"
-      >
-        <Gear size={12} className={isRunning ? "animate-spin" : ""} />
-        <span className="max-w-[16rem] truncate">{isRunning ? liveLabel : "Worked"}</span>
-        {isRunning ? (
-          <span className="ml-0.5 inline-flex gap-0.5">
-            <span className="h-1 w-1 animate-pulse rounded-full bg-ink/40 [animation-delay:0ms]" />
-            <span className="h-1 w-1 animate-pulse rounded-full bg-ink/40 [animation-delay:150ms]" />
-            <span className="h-1 w-1 animate-pulse rounded-full bg-ink/40 [animation-delay:300ms]" />
-          </span>
-        ) : null}
-        {startAt !== undefined && (
-          <span className="tabular-nums text-ink/35">· {fmtClock(totalMs)}</span>
-        )}
-        {toolMsgs.length > 0 && (
-          <span className="tabular-nums text-ink/30">
-            · {toolMsgs.length} {toolMsgs.length === 1 ? "step" : "steps"}
-          </span>
-        )}
-        {files.length > 0 && (
-          <span className="inline-flex items-center gap-1 text-ink/40">
-            <span className="text-ink/25">·</span>
-            <FileText size={10} />
-            <span className="tabular-nums">{files.length}</span>
-          </span>
-        )}
-        {(added > 0 || removed > 0) && <DiffStat added={added} removed={removed} compact />}
-        <CaretDown
-          size={10}
-          className={["ml-auto transition-transform", open ? "rotate-180" : ""].join(" ")}
+      {/* ── interleaved timeline — flat in the thread, no container ── */}
+      <div className="relative flex flex-col gap-1.5">
+        {/* vertical rail line threaded behind the node markers */}
+        <span
+          className="pointer-events-none absolute bottom-2 left-[10px] top-2 w-px bg-white/12"
+          aria-hidden
         />
-      </button>
-
-      {/* ── interleaved timeline rail ── */}
-      <Collapse open={open}>
-        <div className={["relative mt-1 flex flex-col gap-1.5 rounded-xl px-3 py-2.5", FROST].join(" ")}>
-          {/* vertical rail line behind the node markers */}
-          <span
-            className="pointer-events-none absolute bottom-3 left-[16px] top-3 w-px bg-white/12"
-            aria-hidden
-          />
-          {clusterNodes(nodes).map((item) =>
-            item.kind === "reasoning" ? (
-              <ReasoningNode key={item.key} msg={item.msg} />
-            ) : item.kind === "tool" ? (
-              <ToolNode key={item.key} msg={item.msg} />
-            ) : (
-              <ToolGroup key={item.key} msgs={item.msgs} />
-            ),
-          )}
-          {/* live tail when the model is working between visible nodes */}
-          {isRunning && !anyLive && (
-            <div className="relative flex items-center gap-2.5 pl-1">
-              <span className="relative z-10 flex h-3 w-3 items-center justify-center">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-              </span>
-              <span className="animate-pulse text-[11px] text-ink/55">Working…</span>
-            </div>
-          )}
-        </div>
-      </Collapse>
+        {clusterNodes(nodes).map((item) =>
+          item.kind === "reasoning" ? (
+            <ReasoningNode key={item.key} msg={item.msg} />
+          ) : item.kind === "tool" ? (
+            <ToolNode key={item.key} msg={item.msg} />
+          ) : (
+            <ToolGroup key={item.key} msgs={item.msgs} />
+          ),
+        )}
+        {/* live tail when the model is working between visible nodes */}
+        {isRunning && !anyLive && (
+          <div className="relative flex items-center gap-2.5 pl-1">
+            <span className="relative z-10 flex h-3 w-3 items-center justify-center">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+            </span>
+            <span className="animate-pulse text-[11px] text-ink/55">Working…</span>
+          </div>
+        )}
+      </div>
 
       {/* ── final answer + footer + copy ── */}
       {answer && (answer.content.length > 0 || status === "error") && (
@@ -288,15 +216,15 @@ export function RunTimeline({ messages }: { messages: Message[] }) {
   );
 }
 
-/* ── reasoning node ───────────────────────────────────────────────────── */
+/* ── reasoning node — thinking shown out loud, inline (no accordion) ───── */
 function ReasoningNode({ msg }: { msg: Message }) {
   const streaming = isStreaming(msg);
-  const [open, setOpen] = useState(false);
   useTicker(streaming);
 
   const start = msg.thinkingStartedAt;
   const end = msg.thinkingEndedAt;
   const elapsed = start !== undefined ? (end ?? Date.now()) - start : undefined;
+  const body = (msg.thinkingContent ?? "").trim();
 
   return (
     <div className="relative flex gap-2.5 pl-1">
@@ -309,40 +237,30 @@ function ReasoningNode({ msg }: { msg: Message }) {
         />
       </span>
       <div className="min-w-0 flex-1">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          className="flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[11px] text-ink/55 hover:bg-ink/5 hover:text-ink/75"
-        >
+        {/* label row — no toggle; reasoning is always visible below it */}
+        <div className="flex items-center gap-1.5 px-1 py-0.5 text-[11px] text-ink/55">
           <Brain
             size={12}
-            weight={streaming && !open ? "fill" : "regular"}
-            className={streaming && !open ? "animate-icon-pulse text-indigo-300" : "text-ink/45"}
+            weight={streaming ? "fill" : "regular"}
+            className={streaming ? "animate-icon-pulse text-indigo-300" : "text-ink/45"}
           />
-          <span className="min-w-0 flex-1 truncate">
-            {streaming ? "Thinking" : snippet(msg.thinkingContent) || "Reasoning"}
-          </span>
+          <span className="min-w-0 flex-1 truncate">{streaming ? "Thinking" : "Reasoning"}</span>
           {elapsed !== undefined && (
             <span className="shrink-0 tabular-nums text-ink/30">{fmtClock(elapsed)}</span>
           )}
-          <CaretDown
-            size={9}
-            className={["shrink-0 transition-transform", open ? "rotate-180" : ""].join(" ")}
-          />
-        </button>
+        </div>
 
-        {/* live preview (last 1–3 lines) while streaming and collapsed */}
-        {streaming && !open && tailLines(msg.thinkingContent) && (
-          <p className="mt-0.5 whitespace-pre-wrap px-1 text-[11px] leading-snug text-ink/45 [overflow-wrap:anywhere]">
-            {tailLines(msg.thinkingContent)}
+        {/* the thought itself — rendered out loud, in chronological place */}
+        {body ? (
+          <p className="mt-0.5 whitespace-pre-wrap px-1 text-[11.5px] leading-relaxed text-ink/75 [overflow-wrap:anywhere]">
+            {body}
+            {streaming && (
+              <span className="ml-0.5 inline-block h-3 w-1 animate-pulse rounded-sm bg-indigo-400/70 align-text-bottom" />
+            )}
           </p>
-        )}
-
-        <Collapse open={open}>
-          <div className="mt-1 whitespace-pre-wrap rounded-lg border border-white/10 bg-ink/5 px-2.5 py-2 text-[11px] leading-relaxed text-ink/75 [overflow-wrap:anywhere]">
-            {msg.thinkingContent}
-          </div>
-        </Collapse>
+        ) : streaming ? (
+          <p className="mt-0.5 px-1 text-[11px] italic text-ink/40">thinking…</p>
+        ) : null}
       </div>
     </div>
   );
