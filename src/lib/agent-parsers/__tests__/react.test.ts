@@ -78,7 +78,7 @@ describe("createReActParser", () => {
     ]);
   });
 
-  it("accumulates a multi-line observation into one preview", () => {
+  it("accumulates a multi-line observation, preserving line breaks", () => {
     const events = run([
       "Action: read_file",
       'Action Input: {"path": "a.ts"}',
@@ -94,7 +94,7 @@ describe("createReActParser", () => {
         path: "a.ts",
         input: '{"path": "a.ts"}',
       },
-      { type: "tool_end", ok: true, preview: "line one line two" },
+      { type: "tool_end", ok: true, preview: "line one\nline two" },
       { type: "text", text: "done" },
     ]);
   });

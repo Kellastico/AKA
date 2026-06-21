@@ -23,13 +23,13 @@ export function fmtClock(ms: number): string {
 }
 
 /**
- * Approximate token count from a character count using the chars/4 heuristic
- * AKA already uses in lieu of a real tokenizer in the WebView (see the Rust
- * `count_tokens` command + the live tokens/sec meters). Formatted "812" /
- * "3.4k" so the run footer reads like the reference ("3.4k tokens").
+ * Format a token *count* as "812" / "3.4k" so the run footer reads like the
+ * context meter ("~371 / 32.8k"). The count itself comes from `estimateTokens`
+ * in `lib/token-estimate` — the same mapping + chars/4 heuristic the backend
+ * `count_tokens` command uses — so the footer and the context-window meter can
+ * never disagree about what a run contributed.
  */
-export function approxTokens(chars: number): string {
-  const tokens = Math.round(chars / 4);
+export function fmtTokenCount(tokens: number): string {
   if (tokens < 1000) return `${tokens}`;
   return `${(tokens / 1000).toFixed(1)}k`;
 }

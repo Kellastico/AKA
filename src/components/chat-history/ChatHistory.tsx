@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "@phosphor-icons/react";
 import { useMessagesStore } from "../../stores/use-messages-store";
+import { useActiveSessionRunning } from "../../stores/use-chat-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { MessageItem } from "./MessageItem";
 import { RunTimeline } from "./RunTimeline";
@@ -19,6 +20,10 @@ const SCROLL_DOWN_THRESHOLD_PX = 220;
 export function ChatHistory() {
   const messages = useMessagesStore((s) => s.messages);
   const isFull = useWorkspaceStore((s) => s.extraPanes.length === 0);
+  // The single source of truth for "this session is running" — the same flag
+  // the composer's stop button reads. Handed to the latest run's timeline so
+  // its footer status can't drift out of sync with the composer.
+  const sessionRunning = useActiveSessionRunning();
   const ref = useRef<HTMLDivElement>(null);
   // Whether we should keep pinning to the bottom on new content. Starts true
   // (initial render scrolls to bottom). Flips to false the moment the user
@@ -92,9 +97,15 @@ export function ChatHistory() {
           <WelcomeHero compact={!isFull} />
         ) : (
           <div className="flex min-w-0 flex-col gap-4">
-            {groups.map((group) =>
+            {groups.map((group, idx) =>
               group.kind === "run" ? (
-                <RunTimeline key={group.key} messages={group.messages} />
+                <RunTimeline
+                  key={group.key}
+                  messages={group.messages}
+                  // Only the last group can be the in-flight run; older runs are
+                  // settled history (live = false) so they always read as Done.
+                  live={idx === groups.length - 1 ? sessionRunning : false}
+                />
               ) : (
                 <MessageItem key={group.key} message={group.message} />
               ),

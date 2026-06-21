@@ -1,3 +1,4 @@
+import { NotePencil } from "@phosphor-icons/react";
 import type { Message, ToolKind } from "../../stores/use-messages-store";
 
 /**
@@ -75,6 +76,24 @@ export function rollupFiles(
   return [...map.values()];
 }
 
+/**
+ * Section labels for an expanded tool panel, named for what the tool actually
+ * did so the user reads "Query / Results" or "Command / Output" rather than a
+ * generic "Input / Output". (`write` is handled separately as a diff.)
+ */
+export function toolIOLabels(kind?: ToolKind): { input: string; output: string } {
+  switch (kind) {
+    case "search":
+      return { input: "Query", output: "Results" };
+    case "read":
+      return { input: "Arguments", output: "Contents" };
+    case "run":
+      return { input: "Command", output: "Output" };
+    default:
+      return { input: "Input", output: "Output" };
+  }
+}
+
 /** English verb for a tool kind, used in the Files-touched panel ("Edited"). */
 export function verbForKind(kind: ToolKind): string {
   switch (kind) {
@@ -117,6 +136,130 @@ export function activeSummary(message: {
     default:
       return clampWords(name ? `Working · ${name}` : "Working");
   }
+}
+
+/* ── edit-diff parsing + render ───────────────────────────────────────────
+ * AKA stores a tool's *input* (the agent's search/replace payload), not a
+ * pre-computed unified diff. For `write` tools we reconstruct a before/after
+ * view from that input so an `edit_file` row can show exactly what changed —
+ * red removed lines, green added lines, and nothing else. Agent-agnostic by
+ * construction: we probe the common key shapes every agent uses rather than
+ * assuming one specific tool format.
+ */
+
+const OLD_KEYS = ["old_string", "old", "search", "before", "find", "original", "old_str"];
+const NEW_KEYS = [
+  "new_string", "new", "replace", "after", "replacement", "new_str", "content", "text", "code",
+];
+
+function firstString(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+function splitLines(s: string): string[] {
+  return s.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+}
+
+export type EditDiff = { removed: string[]; added: string[] };
+
+/**
+ * Best-effort before/after extraction from a `write` tool's input. Handles the
+ * JSON search/replace shape (old_string/new_string and its many synonyms) and
+ * whole-file writes (content/text only → all-added). Returns null when the
+ * input carries nothing diffable, so the caller can fall back to the raw input.
+ */
+export function parseEditDiff(input?: string): EditDiff | null {
+  if (!input) return null;
+  const trimmed = input.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      const oldStr = firstString(obj, OLD_KEYS);
+      const newStr = firstString(obj, NEW_KEYS);
+      if (oldStr !== undefined || newStr !== undefined) {
+        return {
+          removed: oldStr !== undefined ? splitLines(oldStr) : [],
+          added: newStr !== undefined ? splitLines(newStr) : [],
+        };
+      }
+    } catch {
+      // not valid JSON — fall through
+    }
+  }
+  return null;
+}
+
+/** Cap a diff so a giant edit can't blow out the timeline; note the remainder. */
+const MAX_DIFF_LINES = 60;
+
+/**
+ * The expanded body of an `edit_file` (write) tool row: a compact hunk header
+ * (`file · +N −N`) followed by the colour-coded diff and nothing else. Counts
+ * prefer the agent-reported `linesAdded`/`linesRemoved`, falling back to the
+ * parsed line totals. When no before/after can be parsed we still honour
+ * "diffs only" by rendering the raw input as added context.
+ */
+export function DiffView({
+  path,
+  input,
+  linesAdded,
+  linesRemoved,
+}: {
+  path?: string;
+  input?: string;
+  linesAdded?: number;
+  linesRemoved?: number;
+}) {
+  const parsed = parseEditDiff(input);
+  const removed = parsed?.removed ?? [];
+  const added = parsed?.added ?? (parsed ? [] : input ? splitLines(input) : []);
+  const addN = linesAdded ?? added.length;
+  const remN = linesRemoved ?? removed.length;
+
+  const rows: { sign: "-" | "+"; text: string }[] = [
+    ...removed.map((text) => ({ sign: "-" as const, text })),
+    ...added.map((text) => ({ sign: "+" as const, text })),
+  ];
+  const shown = rows.slice(0, MAX_DIFF_LINES);
+  const overflow = rows.length - shown.length;
+
+  return (
+    <div className="min-w-0">
+      <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[10.5px] text-ink/45">
+        <NotePencil size={11} className="shrink-0 text-ink/40" />
+        <span className="truncate">{baseName(path) ?? "edit"}</span>
+        <span className="text-ink/25">·</span>
+        <span className="text-emerald-300/90">+{addN}</span>
+        <span className="text-red-300/90">−{remN}</span>
+      </div>
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto">
+          {shown.map((r, i) => (
+            <div
+              key={i}
+              className={[
+                "whitespace-pre-wrap rounded-sm px-1.5 font-mono text-[11px] leading-[1.55] [overflow-wrap:anywhere]",
+                r.sign === "-" ? "bg-red-500/10 text-red-300" : "bg-emerald-500/10 text-emerald-300",
+              ].join(" ")}
+            >
+              {r.sign} {r.text}
+            </div>
+          ))}
+          {overflow > 0 && (
+            <div className="mt-1 px-1.5 font-mono text-[10.5px] text-ink/35">
+              … {overflow} more line{overflow === 1 ? "" : "s"}
+            </div>
+          )}
+        </div>
+      ) : (
+        <span className="font-mono text-[11px] text-ink/40">No diff detail.</span>
+      )}
+    </div>
+  );
 }
 
 /**

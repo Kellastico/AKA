@@ -91,11 +91,26 @@ function pathFromInput(input: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
-/** Collapse an observation to a compact one-line preview. */
+/**
+ * Cap a tool observation so the expanded panel can show what actually happened
+ * (file contents, search hits, command output) instead of a flattened one-liner,
+ * while a megabyte dump still can't bloat the persisted session store.
+ */
+const MAX_OBSERVATION = 2_000;
+
+/**
+ * Tidy an observation for display: collapse runs of spaces/tabs, trim trailing
+ * blank lines, but PRESERVE line breaks so multi-line output reads faithfully.
+ * Capped at MAX_OBSERVATION chars.
+ */
 function previewFromObservation(obs: string): string | undefined {
-  const clean = obs.replace(/\s+/g, " ").trim();
+  const clean = obs
+    .replace(/[ \t]+/g, " ")
+    .replace(/[ \t]*\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   if (!clean) return undefined;
-  return clean.length > 160 ? clean.slice(0, 160) + "…" : clean;
+  return clean.length > MAX_OBSERVATION ? clean.slice(0, MAX_OBSERVATION) + "…" : clean;
 }
 
 type Section = "none" | "thought" | "action" | "action_input" | "observation" | "answer";

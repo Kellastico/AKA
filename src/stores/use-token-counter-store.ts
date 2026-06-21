@@ -3,9 +3,9 @@ import {
   countTokens,
   getContextLimit,
   getMemoryUsage,
-  type ChatMessage,
 } from "../lib/tauri/commands";
-import { useMessagesStore, type Message } from "./use-messages-store";
+import { useMessagesStore } from "./use-messages-store";
+import { toChatMessages } from "../lib/token-estimate";
 import {
   builtinEndpoint,
   useRuntimeStore,
@@ -46,16 +46,6 @@ function classify(ratio: number): TokenStatus {
 let cachedLimitKey = "";
 let cachedLimit = 0;
 
-function toChatMessage(m: Message): ChatMessage {
-  if (m.role === "user") return { role: "user", content: m.content };
-  if (m.role === "assistant") return { role: "assistant", content: m.content };
-  // Tool messages carry the file path + diff stats. Encode them as
-  // assistant-side context so they contribute to the token estimate.
-  const path = m.toolPath ?? "";
-  const kind = m.toolKind ?? "tool";
-  return { role: "assistant", content: `[${kind}] ${path}`.trim() };
-}
-
 export const useTokenCounterStore = create<TokenCounterState>((set, get) => ({
   used: 0,
   limit: 32_768,
@@ -91,10 +81,9 @@ export const useTokenCounterStore = create<TokenCounterState>((set, get) => ({
         cachedLimit = limit;
       }
 
+      const chatMessages = toChatMessages(messages);
       const used =
-        messages.length === 0
-          ? 0
-          : await countTokens(messages.map(toChatMessage));
+        chatMessages.length === 0 ? 0 : await countTokens(chatMessages);
 
       const ratio = limit > 0 ? used / limit : 0;
       const status = classify(ratio);
