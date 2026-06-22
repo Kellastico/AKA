@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   ArrowSquareOut,
+  CheckCircle,
   CircleNotch,
   Gear,
   Lightbulb,
@@ -20,8 +21,9 @@ import {
 } from "../../lib/tauri/commands";
 import { useProjectWatch } from "../../lib/use-project-watch";
 import { findFix } from "../../lib/error-fixes";
-import { humanizeError, isPortInUseError } from "../../lib/humanize-error";
+import { extractBusyPort, humanizeError, isPortInUseError } from "../../lib/humanize-error";
 import { runAutoFix } from "../../lib/run-auto-fix";
+import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
 import { Tooltip } from "../Tooltip";
 import { DevServerPromptModal } from "../DevServerPromptModal";
 
@@ -187,6 +189,13 @@ export function BrowserContent({
     }
   };
 
+  // Restart used by the "port freed" banner: the dev-server command was fine —
+  // only the port was held — so go straight to start, bypassing the
+  // failed→reconfigure prompt that handleStart would otherwise show.
+  const restartServer = () => {
+    if (projectPath) void startServer(projectPath);
+  };
+
   // "recovering" is a busy state too — AKA is freeing a port and relaunching.
   const isRunning = devStatus === "running";
   const isRecovering = devStatus === "recovering";
@@ -295,6 +304,7 @@ export function BrowserContent({
           port={busyPort ?? parsePort(draft) ?? parsePort(url)}
           onReconfigure={() => setPromptOpen(true)}
           onFreePort={projectPath ? (p) => freePortAndRestart(p) : null}
+          onRestart={projectPath ? restartServer : null}
         />
       )}
 
@@ -358,10 +368,13 @@ function DevServerFailureBanner({
   port,
   onReconfigure,
   onFreePort,
+  onRestart,
 }: {
   port: number | null;
   onReconfigure: () => void;
   onFreePort: ((port: number) => Promise<void>) | null;
+  /** Start the dev server again after the port has been freed. */
+  onRestart: (() => void) | null;
 }) {
   const log = useDevServerStore((s) => s.log);
 
@@ -382,12 +395,29 @@ function DevServerFailureBanner({
   const fix = useMemo(() => findFix(logText), [logText]);
   const [fixing, setFixing] = useState(false);
   const [killing, setKilling] = useState(false);
+  // Once the auto-fix has freed the port, swap the failure banner for a calm
+  // "port is free → Restart" affordance so the user gets explicit confirmation
+  // and a one-click next step instead of being left guessing.
+  const [freed, setFreed] = useState(false);
+  const [freedPort, setFreedPort] = useState<number | null>(null);
 
   const handleFix = async () => {
     if (!fix) return;
     setFixing(true);
     try {
-      await runAutoFix(fix);
+      const ran = await runAutoFix(fix);
+      if (ran) {
+        const p = extractBusyPort(logText) ?? port;
+        setFreedPort(p);
+        setFreed(true);
+        useRuntimeStore.getState().pushToast({
+          kind: "info",
+          text:
+            p != null
+              ? `Port ${p} is now free — restart the dev server.`
+              : "Port freed — restart the dev server.",
+        });
+      }
     } finally {
       setFixing(false);
     }
@@ -405,6 +435,29 @@ function DevServerFailureBanner({
 
   const portInUse = useMemo(() => isPortInUseError(logText), [logText]);
   const canKill = portInUse && port != null && onFreePort != null;
+
+  // Port freed → replace the whole failure banner with an explicit confirmation
+  // and a single Restart action.
+  if (freed) {
+    return (
+      <div className="mx-3 mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-100">
+        <div className="flex items-center gap-2">
+          <CheckCircle size={12} weight="fill" className="shrink-0 text-emerald-300/85" />
+          <span>{freedPort != null ? `Port ${freedPort} is free.` : "Port freed."}</span>
+        </div>
+        {onRestart && (
+          <button
+            type="button"
+            onClick={() => onRestart()}
+            className="inline-flex items-center gap-1.5 rounded-md border border-emerald-400/40 bg-emerald-500/15 px-2 py-1 font-medium text-emerald-100 hover:border-emerald-300/60 hover:bg-emerald-500/25"
+          >
+            <Play size={11} weight="fill" />
+            Restart dev server
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="mx-3 mb-2 flex flex-col gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">

@@ -74,11 +74,16 @@ export function ChatHistory() {
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    // A new message was just appended — always re-anchor to bottom so the
-    // user's own send doesn't disappear off-screen, even if they'd scrolled
-    // up earlier.
+    // A new message was just appended. Re-anchor to bottom ONLY for the user's
+    // own send (so their message jumps into view). New agent messages —
+    // reasoning, tool calls, the streaming answer — must NOT yank the reader
+    // back down while they've scrolled up; they follow only if already pinned
+    // to the bottom (stickRef), and otherwise use the Scroll-to-Bottom button.
     if (messages.length > prevLenRef.current) {
-      stickRef.current = true;
+      const last = messages[messages.length - 1];
+      if (last?.role === "user") {
+        stickRef.current = true;
+      }
     }
     prevLenRef.current = messages.length;
 

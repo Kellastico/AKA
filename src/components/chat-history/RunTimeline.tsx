@@ -8,6 +8,7 @@ import {
   TerminalWindow,
   MagnifyingGlass,
   Warning,
+  Stack,
   type Icon,
 } from "@phosphor-icons/react";
 import type { Message, ToolKind } from "../../stores/use-messages-store";
@@ -43,6 +44,65 @@ const isStreaming = (m: Message) =>
 const isRunningTool = (m: Message) => m.toolStatus === "running";
 
 /**
+ * A rendered timeline row. Reasoning and short tool spans (1–2 calls) render
+ * individually, in chronological order. A *run of 3+ consecutive tool calls
+ * with NO reasoning between them* collapses into one `tool-group` accordion in
+ * its exact chronological position — so a burst of back-to-back tool calls
+ * doesn't sprawl, while interleaved reasoning + tools stay flat.
+ */
+export type RenderItem =
+  | { kind: "reasoning"; msg: Message; key: string }
+  | { kind: "tool"; msg: Message; key: string }
+  | { kind: "tool-group"; msgs: Message[]; key: string };
+
+/** Group maximal runs of consecutive tool nodes; only runs of >2 collapse. */
+export function clusterNodes(nodes: RunNode[]): RenderItem[] {
+  const items: RenderItem[] = [];
+  let i = 0;
+  while (i < nodes.length) {
+    if (nodes[i].type === "reasoning") {
+      items.push({ kind: "reasoning", msg: nodes[i].msg, key: nodes[i].key });
+      i++;
+      continue;
+    }
+    const run: RunNode[] = [];
+    while (i < nodes.length && nodes[i].type === "tool") {
+      run.push(nodes[i]);
+      i++;
+    }
+    if (run.length > 2) {
+      items.push({
+        kind: "tool-group",
+        msgs: run.map((t) => t.msg),
+        key: `grp-${run[0].key}`,
+      });
+    } else {
+      for (const t of run) items.push({ kind: "tool", msg: t.msg, key: t.key });
+    }
+  }
+  return items;
+}
+
+/** One-line summary for a collapsed tool group ("Read 3 files" / "5 tool calls"). */
+export function groupSummary(msgs: Message[]): string {
+  const n = msgs.length;
+  const kinds = new Set(msgs.map((m) => m.toolKind));
+  if (kinds.size === 1) {
+    switch (msgs[0].toolKind) {
+      case "write":
+        return `Edited ${n} files`;
+      case "read":
+        return `Read ${n} files`;
+      case "search":
+        return `Ran ${n} searches`;
+      case "run":
+        return `Ran ${n} commands`;
+    }
+  }
+  return `${n} tool calls`;
+}
+
+/**
  * One agent run, rendered as a single ordered timeline: reasoning segments and
  * tool calls interleave on a vertical rail in the exact order they occurred,
  * then the final answer + a roll-up footer. Reasoning and tools are no longer
@@ -67,6 +127,9 @@ export function RunTimeline({
    */
   live?: boolean;
 }) {
+  // Collapsed/expanded state of the settled-run "Worked for …" accordion.
+  const [activityOpen, setActivityOpen] = useState(false);
+
   // The trailing assistant message (if any) is the run's final answer.
   const answer = [...messages].reverse().find((m) => m.role === "assistant");
   const activity = messages.filter((m) => m !== answer);
@@ -135,43 +198,116 @@ export function RunTimeline({
   // reasoning/tool I/O is generated then dropped, so it isn't counted here.
   const tokens = estimateTokens(toChatMessages(messages));
 
-  // Drives the final-answer divider: only draw the separating border when
-  // there's reasoning/tool activity above it to separate from.
-  const hasActivity = nodes.length > 0;
+  // ── final-answer resolution + salvage ──────────────────────────────────
+  const answerEmpty = !answer || answer.content.trim().length === 0;
+
+  // ReAct salvage: a settled, non-error run with no `Answer:` line ends on the
+  // model's final Thought — its real last words (an actual conclusion, or e.g.
+  // a "tool budget reached" note). Surface that as the answer instead of leaving
+  // the run blank. Normal runs (which emit `Answer:`) are untouched.
+  let recovered: string | undefined;
+  let timelineNodes = nodes;
+  if (!isRunning && status !== "error" && answerEmpty && nodes.length > 0) {
+    const last = nodes[nodes.length - 1];
+    if (last.type === "reasoning") {
+      const text = (last.msg.thinkingContent ?? "").trim();
+      if (text.length > 0) {
+        recovered = text;
+        timelineNodes = nodes.slice(0, -1);
+      }
+    }
+  }
+
+  // Settled with steps but nothing surfaceable → show an explicit notice rather
+  // than a confusing blank (e.g. the reply was absorbed into the last tool's
+  // output, or the agent hit its tool-call budget).
+  const finishedEmpty =
+    !isRunning && status !== "error" && answerEmpty && !recovered && nodes.length > 0;
+
+  // Anything to render in the answer area: a real answer, a recovered one, the
+  // empty-run notice, or an error banner.
+  const hasAnswerArea =
+    (!!answer && answer.content.length > 0) || !!recovered || finishedEmpty || status === "error";
+
+  // Drives the final-answer divider: only when there's timeline activity above.
+  const hasActivity = timelineNodes.length > 0;
+
+  // The inline timeline — rail + interleaved reasoning/tool rows + live tail.
+  // Unchanged; only WHERE it renders (inline vs. inside the settled accordion)
+  // changes below.
+  const timeline = (
+    <div className="relative flex flex-col gap-1.5">
+      {/* vertical rail line threaded behind the node markers */}
+      <span
+        className="pointer-events-none absolute bottom-2 left-[10px] top-2 w-px bg-white/12"
+        aria-hidden
+      />
+      {/* Reasoning + tools render in chronological order. A burst of 3+ tool
+          calls with no reasoning between them folds into one tool-group
+          accordion at its place; everything else stays flat and inline. */}
+      {clusterNodes(timelineNodes).map((item) =>
+        item.kind === "reasoning" ? (
+          <ReasoningNode key={item.key} msg={item.msg} />
+        ) : item.kind === "tool" ? (
+          <ToolNode key={item.key} msg={item.msg} />
+        ) : (
+          <ToolGroup key={item.key} msgs={item.msgs} />
+        ),
+      )}
+      {/* live tail when the model is working between visible nodes */}
+      {isRunning && !anyLive && (
+        <div className="relative flex items-center gap-2.5 pl-1">
+          <span className="relative z-10 flex h-3 w-3 items-center justify-center">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+          </span>
+          <span className="animate-pulse text-[11px] text-ink/55">Working…</span>
+        </div>
+      )}
+    </div>
+  );
+
+  // Once the run has settled AND produced its answer, fold the whole activity
+  // log into a single collapsed "Worked for …" accordion above the answer. While
+  // the run is live (or it errored with no answer) the timeline stays inline so
+  // you watch it think. Additive: the inline `timeline` renders verbatim inside.
+  const settledIntoAccordion =
+    !isRunning && hasActivity && hasAnswerArea && status !== "error";
 
   return (
     <div className="flex w-full min-w-0 flex-col">
-      {/* ── interleaved timeline — flat in the thread, no container ── */}
-      <div className="relative flex flex-col gap-1.5">
-        {/* vertical rail line threaded behind the node markers */}
-        <span
-          className="pointer-events-none absolute bottom-2 left-[10px] top-2 w-px bg-white/12"
-          aria-hidden
-        />
-        {/* Every reasoning + tool row renders inline, in the exact order it
-            occurred — reasoning stays in chronological linestep with the tool
-            calls (no grouping/collapsing into a separate accordion). */}
-        {nodes.map((node) =>
-          node.type === "reasoning" ? (
-            <ReasoningNode key={node.key} msg={node.msg} />
-          ) : (
-            <ToolNode key={node.key} msg={node.msg} />
-          ),
-        )}
-        {/* live tail when the model is working between visible nodes */}
-        {isRunning && !anyLive && (
-          <div className="relative flex items-center gap-2.5 pl-1">
-            <span className="relative z-10 flex h-3 w-3 items-center justify-center">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-            </span>
-            <span className="animate-pulse text-[11px] text-ink/55">Working…</span>
-          </div>
-        )}
-      </div>
+      {settledIntoAccordion ? (
+        <div className="flex flex-col">
+          <button
+            onClick={() => setActivityOpen((v) => !v)}
+            aria-expanded={activityOpen}
+            className="inline-flex max-w-full items-center gap-1.5 self-start rounded-md px-1 py-0.5 text-[11px] text-ink/55 transition-colors hover:bg-ink/5 hover:text-ink/80"
+          >
+            <CaretDown
+              size={10}
+              className={["shrink-0 transition-transform", activityOpen ? "" : "-rotate-90"].join(" ")}
+            />
+            <span className="tabular-nums">Worked for {fmtClock(totalMs)}</span>
+          </button>
+          <Collapse open={activityOpen}>
+            <div className="mt-1.5">{timeline}</div>
+          </Collapse>
+        </div>
+      ) : (
+        timeline
+      )}
 
       {/* ── final answer + footer + copy ── */}
-      {answer && (answer.content.length > 0 || status === "error") && (
-        <AnswerBlock answer={answer} totalMs={totalMs} tokens={tokens} status={status} startAt={startAt} hasActivity={hasActivity} />
+      {answer && hasAnswerArea && (
+        <AnswerBlock
+          answer={answer}
+          totalMs={totalMs}
+          tokens={tokens}
+          status={status}
+          startAt={startAt}
+          hasActivity={hasActivity}
+          recovered={recovered}
+          finishedEmpty={finishedEmpty}
+        />
       )}
     </div>
   );
@@ -363,6 +499,71 @@ function ToolNode({ msg }: { msg: Message }) {
   );
 }
 
+/* ── tool group (3+ back-to-back tool calls, no reasoning between) ──────── */
+function ToolGroup({ msgs }: { msgs: Message[] }) {
+  const [open, setOpen] = useState(false);
+  const anyRunning = msgs.some(isRunningTool);
+  const anyFailed = msgs.some((m) => m.toolStatus === "failed");
+  useTicker(anyRunning);
+
+  const starts = msgs
+    .map((m) => m.toolStartedAt)
+    .filter((x): x is number => x !== undefined);
+  const ends = msgs
+    .filter((m) => m.toolStartedAt !== undefined && m.toolElapsedMs !== undefined)
+    .map((m) => m.toolStartedAt! + m.toolElapsedMs!);
+  const earliest = starts.length ? Math.min(...starts) : undefined;
+  const latest = ends.length ? Math.max(...ends) : undefined;
+  const elapsed =
+    earliest === undefined
+      ? undefined
+      : Math.max(0, (anyRunning ? Date.now() : latest ?? Date.now()) - earliest);
+
+  return (
+    <div className="relative flex gap-2.5 pl-1">
+      <span className="relative z-10 mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
+        {anyRunning ? (
+          <span className="h-2 w-2 animate-pulse rounded-full bg-ink/45" />
+        ) : anyFailed ? (
+          <Warning size={12} weight="fill" className="text-amber-400" />
+        ) : (
+          <CheckCircle size={12} weight="fill" className="text-ink/40" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        {/* Flat hugged header — same chip language as the single tool rows. */}
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[11.5px] text-ink/60 transition-colors hover:bg-ink/5 hover:text-ink/85"
+        >
+          <Stack size={12} className="shrink-0 text-ink/45" />
+          <span className="truncate font-medium">
+            {anyRunning ? `Running ${msgs.length} tools` : groupSummary(msgs)}
+          </span>
+          {elapsed !== undefined && (
+            <span className="ml-1 shrink-0 tabular-nums text-[10px] text-ink/30">
+              {fmtElapsed(elapsed)}
+            </span>
+          )}
+          <CaretDown
+            size={10}
+            className={["shrink-0 transition-transform", open ? "" : "-rotate-90"].join(" ")}
+          />
+        </button>
+        {/* Expanded → the individual tool chips, in order, unchanged. */}
+        <Collapse open={open}>
+          <div className="mt-1 flex flex-col gap-1.5">
+            {msgs.map((m) => (
+              <ToolNode key={m.id} msg={m} />
+            ))}
+          </div>
+        </Collapse>
+      </div>
+    </div>
+  );
+}
+
 /* ── answer + footer + copy ───────────────────────────────────────────── */
 function AnswerBlock({
   answer,
@@ -371,6 +572,8 @@ function AnswerBlock({
   status,
   startAt,
   hasActivity,
+  recovered,
+  finishedEmpty,
 }: {
   answer: Message;
   totalMs: number;
@@ -378,11 +581,19 @@ function AnswerBlock({
   status: "running" | "error" | "done";
   startAt?: number;
   hasActivity: boolean;
+  /** Model's final-step text, surfaced when no `Answer:` was emitted. */
+  recovered?: string;
+  /** Run settled with steps but produced nothing surfaceable. */
+  finishedEmpty?: boolean;
 }) {
   // First word capitalised — a status label, not a log line.
   const statusText = status === "running" ? "Running" : status === "error" ? "Error" : "Done";
   const statusColor =
     status === "error" ? "text-amber-300" : status === "running" ? "text-indigo-300" : "text-emerald-300/90";
+
+  // The body is the real answer when present, else the salvaged final-step text.
+  const bodyText = answer.content.trim().length > 0 ? answer.content : recovered ?? "";
+  const isRecovered = answer.content.trim().length === 0 && !!recovered;
 
   return (
     <div
@@ -400,9 +611,27 @@ function AnswerBlock({
         </div>
       )}
 
-      {answer.content.length > 0 && (
+      {/* Salvaged reply: the model concluded without an `Answer:` tag, so this is
+          its final step surfaced as the answer — labelled so it reads honestly. */}
+      {isRecovered && !answer.error && (
+        <div className="flex items-center gap-1.5 text-[10px] text-ink/35">
+          <Brain size={11} className="text-ink/30" />
+          <span>Recovered from the model's final step — no final-answer tag was emitted</span>
+        </div>
+      )}
+
+      {bodyText.length > 0 && (
         <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-[13px] leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
-          <Markdown>{answer.content}</Markdown>
+          <Markdown>{bodyText}</Markdown>
+        </div>
+      )}
+
+      {/* Settled with steps but no surfaceable reply — make it explicit. */}
+      {finishedEmpty && !answer.error && (
+        <div className="font-mono text-[12px] italic leading-relaxed text-ink/45">
+          The agent finished its tool calls but didn't return a final answer. Its
+          reply may be inside the last tool's output above, or it ran out of
+          tool-call budget — try a more specific prompt or raise the agent's limit.
         </div>
       )}
 
@@ -416,9 +645,9 @@ function AnswerBlock({
       </div>
 
       {/* hover-persistent action row */}
-      {answer.content.length > 0 && (
+      {bodyText.length > 0 && (
         <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <CopyButton text={answer.content} className="border border-white/10" />
+          <CopyButton text={bodyText} className="border border-white/10" />
         </div>
       )}
     </div>
