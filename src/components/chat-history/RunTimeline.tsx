@@ -115,6 +115,7 @@ export function groupSummary(msgs: Message[]): string {
 export function RunTimeline({
   messages,
   live,
+  staleSince,
 }: {
   messages: Message[];
   /**
@@ -126,6 +127,13 @@ export function RunTimeline({
    * message-derived liveness below.
    */
   live?: boolean;
+  /**
+   * When the live agent has been silent past the stale threshold: the timestamp
+   * of its last activity (the watchdog flags it but never kills). Drives the
+   * non-blocking "agent may be stale" notice on the live tail. `null` while the
+   * agent is moving or the run isn't the live one.
+   */
+  staleSince?: number | null;
 }) {
   // Collapsed/expanded state of the settled-run "Worked for …" accordion.
   const [activityOpen, setActivityOpen] = useState(false);
@@ -261,6 +269,20 @@ export function RunTimeline({
             <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
           </span>
           <span className="animate-pulse text-[11px] text-ink/55">Working…</span>
+        </div>
+      )}
+      {/* Stale notice — the agent has gone silent past the threshold. We keep
+          standing by (no kill); this just tells the user it might be wedged and
+          that Stop is theirs to press. Shown even while a tool reads "running",
+          since a hung tool is exactly the stale case. */}
+      {isRunning && staleSince != null && (
+        <div className="relative ml-1 flex items-start gap-1.5 rounded-md border border-amber-400/25 bg-amber-500/[0.07] px-2 py-1.5 text-[11px] leading-snug text-amber-100/85">
+          <Warning size={12} weight="fill" className="mt-px shrink-0 text-amber-300/90" />
+          <span>
+            Agent may be stale — no output for{" "}
+            <span className="tabular-nums">{fmtClock(now - staleSince)}</span>. Still
+            standing by; press Stop to cancel if it's wedged.
+          </span>
         </div>
       )}
     </div>

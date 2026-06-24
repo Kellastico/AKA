@@ -508,6 +508,15 @@ type ChatState = {
       pendingQuestion?: AgentQuestion | null;
       /** Lifecycle of the live run — flips to "paused" under SIGSTOP. */
       runState?: "running" | "paused";
+      /**
+       * Set by the stale-agent watchdog to the timestamp of the run's last real
+       * activity once it has been silent past the stale threshold; null/absent
+       * while it's still moving. Drives the "agent may be stale" banner. We never
+       * kill on this — it's a heads-up, not a timeout. Cleared the instant output
+       * resumes, so a slow-but-alive run silently recovers and can re-warn if it
+       * stalls again later.
+       */
+      staleSince?: number | null;
     }
   >;
   /**
@@ -984,17 +993,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }, 500);
 
-        // Stuck-agent watchdog. Agents stream reasoning/tool events continuously
-        // while working, so total silence for a long stretch means the process
-        // is wedged — a model that bailed without exiting, or a hung tool. The
-        // agent path (unlike the LLM path) has no built-in timeout, so a bailed
-        // run would otherwise pulse "working" and keep its Stop button forever
-        // until the user intervened. On a stall we kill the process and settle
-        // the UI: `detach` finalizes the bubble + closes any running tool rows,
-        // `clearRun` drops the active-run state. Skipped while the agent is
-        // legitimately blocked on an interactive question.
-        const AGENT_STUCK_MS = 180_000;
+        // Stale-agent watchdog. Agents stream reasoning/tool events while they
+        // work, so a long total silence means *either* a genuinely slow step
+        // (local models can take many minutes — especially on images) *or* a
+        // wedged process. We can't tell the two apart from the outside, so we no
+        // longer kill on silence: after STALE_MS of no movement we warn the user
+        // the agent may be stale and keep standing by, leaving the Stop button to
+        // them. The warning clears the instant output resumes, so a slow-but-
+        // alive run recovers on its own and can re-warn if it stalls again later.
+        // Skipped while the agent is legitimately blocked on an interactive
+        // question (that's waiting on the user, not stale).
+        const AGENT_STALE_MS = 360_000; // 6 min of silence → warn, never kill
         let lastAgentActivityAt = Date.now();
+        let staleWarned = false;
+        const setStale = (since: number | null) =>
+          set((st) =>
+            runKey in st.runs
+              ? { runs: { ...st.runs, [runKey]: { ...st.runs[runKey], staleSince: since } } }
+              : {},
+          );
+        const clearStale = () => {
+          if (!staleWarned) return;
+          staleWarned = false;
+          setStale(null);
+        };
         const agentWatchdog = setInterval(() => {
           if (genOf(runKey) !== myGen) {
             clearInterval(agentWatchdog);
@@ -1002,13 +1024,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           if (get().runs[runKey]?.pendingQuestion) {
             lastAgentActivityAt = Date.now();
+            clearStale();
             return;
           }
-          if (Date.now() - lastAgentActivityAt < AGENT_STUCK_MS) return;
-          clearInterval(agentWatchdog);
-          void stopAgent(runKey);
-          detach();
-          clearRun();
+          if (Date.now() - lastAgentActivityAt < AGENT_STALE_MS) return;
+          if (staleWarned) return; // one warning per stall — no spam
+          staleWarned = true;
+          setStale(lastAgentActivityAt);
+          useRuntimeStore.getState().pushToast({
+            kind: "warning",
+            text: "Agent may be stale — no output for 6 min. Standing by; press Stop to cancel.",
+          });
         }, 10_000);
 
         const applyToolEnd = (event: {
@@ -1072,7 +1098,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               // a different runId and must not leak into this bubble.
               if (e.payload.runId !== runKey) return;
               if (genOf(runKey) !== myGen) return;
-              lastAgentActivityAt = Date.now(); // feed the stuck-agent watchdog
+              lastAgentActivityAt = Date.now(); // feed the stale-agent watchdog
+              clearStale(); // output resumed → drop any "may be stale" warning
               const store = useMessagesStore.getState();
 
               const events = eventParser.feed(e.payload.line);
@@ -1281,6 +1308,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // the run.
           clearInterval(agentTpsInterval);
           clearInterval(agentWatchdog);
+          clearStale(); // run settled — never leave a "may be stale" flag behind
 
           // Agent-agnostic "files touched": diff the run's prerun↔postrun
           // checkpoints and synthesize a tool row per changed file, so the
@@ -1798,6 +1826,19 @@ export function useActiveSessionRunState(): "running" | "paused" | null {
   const activeSessionId = useProjectsStore((s) => s.activeSessionId);
   return useChatStore((s) =>
     activeSessionId ? (s.runs[activeSessionId]?.runState ?? null) : null,
+  );
+}
+
+/**
+ * Timestamp of the *active* session run's last activity once the stale-agent
+ * watchdog has flagged it as silent past the threshold, or null while it's
+ * moving / not running. Drives the "agent may be stale" banner; the run keeps
+ * standing by regardless.
+ */
+export function useActiveSessionStaleSince(): number | null {
+  const activeSessionId = useProjectsStore((s) => s.activeSessionId);
+  return useChatStore((s) =>
+    activeSessionId ? (s.runs[activeSessionId]?.staleSince ?? null) : null,
   );
 }
 

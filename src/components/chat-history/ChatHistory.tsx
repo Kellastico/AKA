@@ -1,7 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown } from "@phosphor-icons/react";
 import { useMessagesStore } from "../../stores/use-messages-store";
-import { useActiveSessionRunning } from "../../stores/use-chat-store";
+import {
+  useActiveSessionRunning,
+  useActiveSessionStaleSince,
+} from "../../stores/use-chat-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { MessageItem } from "./MessageItem";
 import { RunTimeline } from "./RunTimeline";
@@ -24,6 +27,10 @@ export function ChatHistory() {
   // the composer's stop button reads. Handed to the latest run's timeline so
   // its footer status can't drift out of sync with the composer.
   const sessionRunning = useActiveSessionRunning();
+  // Timestamp of the running agent's last activity once the watchdog has flagged
+  // it as silent past the stale threshold (else null). Surfaced on the latest
+  // run's timeline as a non-blocking "may be stale" notice — the run stands by.
+  const staleSince = useActiveSessionStaleSince();
   const ref = useRef<HTMLDivElement>(null);
   // Whether we should keep pinning to the bottom on new content. Starts true
   // (initial render scrolls to bottom). Flips to false the moment the user
@@ -110,6 +117,10 @@ export function ChatHistory() {
                   // Only the last group can be the in-flight run; older runs are
                   // settled history (live = false) so they always read as Done.
                   live={idx === groups.length - 1 ? sessionRunning : false}
+                  // Stale notice belongs only to the live run.
+                  staleSince={
+                    idx === groups.length - 1 && sessionRunning ? staleSince : null
+                  }
                 />
               ) : (
                 <MessageItem key={group.key} message={group.message} />

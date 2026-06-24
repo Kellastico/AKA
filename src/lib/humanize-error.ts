@@ -59,6 +59,20 @@ const RULES: Array<{
     }),
   },
   {
+    // `npm run <script>` where package.json defines no such script. Happens
+    // when the detector defaulted to `npm run dev` for a folder whose
+    // package.json has no dev/start/serve script — usually an otherwise-static
+    // site that just happens to carry a manifest.
+    match: /Missing script:\s*"?([^"\n]+?)"?\s*$/im,
+    build: (m) => ({
+      title: `No "${m[1]}" script in package.json`,
+      hint:
+        `npm couldn't find a "${m[1]}" script to run. If this is a static site, change your ` +
+        "dev-server command to `python3 -m http.server 8000` (Reconfigure → Detect from project). " +
+        `Otherwise add a "${m[1]}" script to your package.json.`,
+    }),
+  },
+  {
     match: /fatal: not a git repository/i,
     build: () => ({
       title: "This folder isn't a git repository",

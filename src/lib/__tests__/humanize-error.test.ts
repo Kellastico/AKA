@@ -58,6 +58,14 @@ npm error path /Users/foo/proj/package.json
 npm error errno -2
 npm error enoent Could not read package.json: Error: ENOENT: no such file or directory, open '/Users/foo/proj/package.json'`;
 
+// npm (v10) when `npm run dev` is invoked but package.json has no "dev" script
+// — the exact failure the detector used to walk into for static sites that
+// happen to carry a package.json.
+const MISSING_NPM_SCRIPT = `npm error Missing script: "dev"
+npm error
+npm error To see a list of scripts, run:
+npm error   npm run`;
+
 const NOT_A_GIT_REPO = `fatal: not a git repository (or any of the parent directories): .git`;
 
 const STDIN_EOF = `EOFError: EOF when reading a line`;
@@ -124,6 +132,12 @@ describe("humanizeError", () => {
   it("recognises a non-git folder", () => {
     const out = humanizeError(NOT_A_GIT_REPO);
     expect(out?.title).toMatch(/git/i);
+  });
+
+  it("recognises an npm 'Missing script' failure and names the script", () => {
+    const out = humanizeError(MISSING_NPM_SCRIPT);
+    expect(out?.title).toMatch(/"dev" script/i);
+    expect(out?.hint).toMatch(/http\.server/i);
   });
 
   it("recognises stdin EOF (interactive prompt) errors", () => {

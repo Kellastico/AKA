@@ -8,6 +8,20 @@ export type DetectedDevServer = {
 };
 
 /**
+ * The catch-all for beginner projects: a folder with index.html. Python's
+ * http.server is on every macOS / most Linux installs out of the box.
+ *
+ * `-u` so logs flush immediately (avoids the buffering trap); `--bind
+ * 127.0.0.1` so the server announces an IPv4 URL the WKWebView can load
+ * reliably on machines with IPv6 disabled.
+ */
+const STATIC_HTML_SERVER: DetectedDevServer = {
+  cmd: "python3",
+  args: ["-u", "-m", "http.server", "8000", "--bind", "127.0.0.1"],
+  reason: "Static HTML — Python web server on port 8000 (localhost)",
+};
+
+/**
  * Inspect the project root and pick a sensible dev-server command. Used by
  * the first-run prompt so users with little-to-no coding experience never
  * have to guess the right invocation for their project type.
@@ -53,8 +67,20 @@ export async function detectDevServer(
         }
       }
     } catch {
-      // fall through — we'll still default to npm run dev so the user
-      // sees a useful error rather than nothing happening.
+      // Malformed/unreadable package.json — fall through to the checks below.
+    }
+    // No runnable script found (or the manifest couldn't be parsed). A
+    // package.json with no dev/start/serve script is common in otherwise-static
+    // projects — a stray manifest for a linter/formatter, an unfinished
+    // scaffold, etc. Blindly running `npm run dev` there just errors with
+    // "Missing script: dev", so if the folder is serveable as static HTML
+    // prefer that over a command we already know will fail.
+    if (names.has("index.html")) {
+      return {
+        ...STATIC_HTML_SERVER,
+        reason:
+          "package.json has no dev/start/serve script — serving index.html as static HTML on port 8000 (localhost)",
+      };
     }
     return {
       cmd: "npm",
@@ -100,18 +126,11 @@ export async function detectDevServer(
   }
 
   // ---- Static HTML fallback ----
-  // The catch-all for beginner projects: a folder with index.html. Python's
-  // http.server is on every macOS / most Linux installs out of the box.
-  //
-  // `-u` so logs flush immediately (avoids the buffering trap); `--bind
-  // 127.0.0.1` so the server announces an IPv4 URL the WKWebView can load
-  // reliably on machines with IPv6 disabled.
+  // The catch-all for beginner projects: a bare folder with index.html and
+  // none of the manifests above. (A project that has *both* a package.json and
+  // an index.html is handled in the Node branch.)
   if (names.has("index.html")) {
-    return {
-      cmd: "python3",
-      args: ["-u", "-m", "http.server", "8000", "--bind", "127.0.0.1"],
-      reason: "Static HTML — Python web server on port 8000 (localhost)",
-    };
+    return STATIC_HTML_SERVER;
   }
 
   return null;
