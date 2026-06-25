@@ -77,6 +77,24 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ---- Apple code signing + notarization ----
+          # These are consumed only on the macOS legs (tauri-action imports the
+          # cert into a temp keychain on macOS and ignores these elsewhere). When
+          # the secrets are unset the macOS build simply falls back to an
+          # unsigned bundle, so the workflow keeps working before they're added.
+          #
+          # APPLE_CERTIFICATE          base64 of your exported "Developer ID
+          #                            Application" cert (.p12)
+          # APPLE_CERTIFICATE_PASSWORD password you set when exporting the .p12
+          # APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+          # APPLE_ID / APPLE_PASSWORD  Apple ID + an app-specific password
+          # APPLE_TEAM_ID              your 10-char Apple Developer Team ID
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: ${{ github.event.inputs.tag || github.ref_name }}
