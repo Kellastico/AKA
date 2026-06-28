@@ -99,4 +99,8 @@ jobs:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseBody: ${{ steps.notes.outputs.body }}
+          # Publish directly instead of leaving a draft to publish by hand.
+          # tauri-action defaults releaseDraft to true; flip it off so a
+          # successful multi-platform build goes live on its own.
+          releaseDraft: false
           args: ${{ matrix.args }}
