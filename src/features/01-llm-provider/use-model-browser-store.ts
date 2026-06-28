@@ -4,6 +4,8 @@ import {
   cancelDownload,
   deleteModel,
   downloadModel,
+  hfListGgufFiles,
+  hfSearchModels,
   importModel,
   listLocalModels,
   loadBuiltinModel,
@@ -12,6 +14,8 @@ import {
   type DownloadComplete,
   type DownloadError,
   type DownloadProgress,
+  type HfGgufFile,
+  type HfModel,
   type LocalModel,
 } from "../../lib/tauri/commands";
 import {
@@ -70,9 +74,57 @@ type ModelBrowserState = {
 
   isInstalled: (filename: string) => boolean;
   isActive: (filename: string) => boolean;
+
+  // --- HuggingFace discovery (search + paste-a-repo) ---
+  hfPanelOpen: boolean;
+  hfQuery: string;
+  hfSearching: boolean;
+  hfResults: HfModel[];
+  /** True once a search/lookup has run, to distinguish "no results" from idle. */
+  hfSearched: boolean;
+  hfError: string | null;
+  /** The repo whose files are being shown, or null while at the search list. */
+  hfSelectedRepo: string | null;
+  hfFiles: HfGgufFile[] | null;
+  hfLoadingFiles: boolean;
+
+  openHfPanel: () => void;
+  closeHfPanel: () => void;
+  setHfQuery: (q: string) => void;
+  /** Run the input: a repo id/URL jumps straight to its files; else search. */
+  submitHfInput: () => Promise<void>;
+  selectHfRepo: (repo: string) => Promise<void>;
+  backToHfResults: () => void;
+  /** Download a chosen repo file, routed through the existing RAM gate. */
+  downloadHfFile: (repo: string, file: HfGgufFile) => void;
 };
 
 let listenersInstalled = false;
+
+/** Heuristic: does the input look like a repo id / HF URL rather than a search? */
+function looksLikeRepo(input: string): boolean {
+  const q = input.trim();
+  if (q.includes("huggingface.co/")) return true;
+  // `owner/name`: exactly one slash, no spaces, both segments non-empty.
+  return /^[\w.-]+\/[\w.-]+$/.test(q);
+}
+
+/** Strip a pasted HF URL down to `owner/name` for display/lookup. */
+function repoIdFromInput(input: string): string {
+  let s = input.trim();
+  const marker = "huggingface.co/";
+  const at = s.indexOf(marker);
+  if (at >= 0) s = s.slice(at + marker.length);
+  const [owner, name] = s.replace(/^\/+|\/+$/g, "").split("/");
+  return owner && name ? `${owner}/${name}` : s;
+}
+
+/** Rough RAM floor for a GGUF: its size plus working overhead. Drives the RAM
+ *  gate for community models, where no curated `minRamGb` exists. */
+function estimateMinRamGb(sizeGb: number): number {
+  if (sizeGb <= 0) return 0;
+  return Math.ceil(sizeGb + 1.5);
+}
 
 export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
   open: false,
@@ -82,6 +134,16 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
   filter: "all",
   ramGateModel: null,
   loadingModel: null,
+
+  hfPanelOpen: false,
+  hfQuery: "",
+  hfSearching: false,
+  hfResults: [],
+  hfSearched: false,
+  hfError: null,
+  hfSelectedRepo: null,
+  hfFiles: null,
+  hfLoadingFiles: false,
 
   init: async () => {
     if (get().initialized) return;
@@ -258,6 +320,93 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
     await unloadBuiltinModel().catch(() => {});
     useRuntimeStore.setState({ selectedModelId: null });
     await useProjectConfigStore.getState().setRuntimeModel("");
+  },
+
+  openHfPanel: () =>
+    set({
+      hfPanelOpen: true,
+      hfError: null,
+    }),
+
+  closeHfPanel: () =>
+    set({
+      hfPanelOpen: false,
+      hfQuery: "",
+      hfResults: [],
+      hfSearched: false,
+      hfError: null,
+      hfSelectedRepo: null,
+      hfFiles: null,
+    }),
+
+  setHfQuery: (hfQuery) => set({ hfQuery }),
+
+  submitHfInput: async () => {
+    const q = get().hfQuery.trim();
+    if (!q) return;
+    // A pasted repo id / URL skips search and goes straight to its files.
+    if (looksLikeRepo(q)) {
+      await get().selectHfRepo(repoIdFromInput(q));
+      return;
+    }
+    set({ hfSearching: true, hfError: null, hfSelectedRepo: null, hfFiles: null });
+    try {
+      const hfResults = await hfSearchModels(q);
+      set({ hfResults, hfSearched: true });
+    } catch (err) {
+      set({
+        hfResults: [],
+        hfSearched: true,
+        hfError: err instanceof Error ? err.message : "Search failed",
+      });
+    } finally {
+      set({ hfSearching: false });
+    }
+  },
+
+  selectHfRepo: async (repo) => {
+    set({
+      hfSelectedRepo: repo,
+      hfFiles: null,
+      hfLoadingFiles: true,
+      hfError: null,
+    });
+    try {
+      const hfFiles = await hfListGgufFiles(repo);
+      set({ hfFiles });
+    } catch (err) {
+      set({
+        hfFiles: [],
+        hfError:
+          err instanceof Error ? err.message : "Could not list repository files",
+      });
+    } finally {
+      set({ hfLoadingFiles: false });
+    }
+  },
+
+  backToHfResults: () =>
+    set({ hfSelectedRepo: null, hfFiles: null, hfError: null }),
+
+  downloadHfFile: (repo, file) => {
+    if (file.sharded) return; // multi-part models can't be loaded standalone
+    const sizeGb = file.sizeBytes / 1_073_741_824;
+    // Build a synthetic catalog entry so community downloads reuse the exact
+    // same RAM gate, progress seeding, and completion handling as curated ones.
+    const model: CuratedModel = {
+      id: `hf-${repo}-${file.filename}`,
+      name: modelIdFromFilename(file.filename),
+      description: `From ${repo}`,
+      huggingfaceRepo: repo,
+      filename: file.filename,
+      sizeGb,
+      minRamGb: estimateMinRamGb(sizeGb),
+      tier: "standard",
+      tags: ["huggingface"],
+      contextWindow: 0,
+      verified: false,
+    };
+    get().requestDownload(model);
   },
 
   isInstalled: (filename) =>

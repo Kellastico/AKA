@@ -1,10 +1,14 @@
 import {
   ArrowCounterClockwise,
+  ArrowLeft,
   CheckCircle,
   CircleNotch,
   Cube,
   DownloadSimple,
   FilePlus,
+  Heart,
+  MagnifyingGlass,
+  ShieldCheck,
   Trash,
   Warning,
   X,
@@ -16,6 +20,7 @@ import {
 } from "./use-model-browser-store";
 import { formatContext, type CuratedModel } from "./curated-models";
 import { useRuntimeStore } from "./use-runtime-store";
+import type { HfGgufFile } from "../../lib/tauri/commands";
 
 const FILTERS: { id: ModelFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -28,6 +33,17 @@ const FILTERS: { id: ModelFilter; label: string }[] = [
 function formatGb(gb: number): string {
   if (gb <= 0) return "—";
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(gb * 1024)} MB`;
+}
+
+function formatBytes(bytes: number): string {
+  return formatGb(bytes / 1_073_741_824);
+}
+
+/** Compact count, e.g. 12345 → "12.3k". */
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
 }
 
 function formatEta(remainingBytes: number, bytesPerSec: number): string {
@@ -59,6 +75,8 @@ export function ModelBrowser() {
   const localModels = useModelBrowserStore((s) => s.localModels);
   const importFromFile = useModelBrowserStore((s) => s.importFromFile);
   const ramGateModel = useModelBrowserStore((s) => s.ramGateModel);
+  const openHfPanel = useModelBrowserStore((s) => s.openHfPanel);
+  const hfPanelOpen = useModelBrowserStore((s) => s.hfPanelOpen);
   const hardware = useRuntimeStore((s) => s.hardware);
 
   if (!open) return null;
@@ -84,6 +102,13 @@ export function ModelBrowser() {
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <h2 className="text-base font-semibold">Models</h2>
           <div className="flex items-center gap-2">
+            <button
+              onClick={openHfPanel}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-xs text-amber-100 hover:bg-amber-400/20"
+            >
+              <MagnifyingGlass size={14} />
+              Add from HuggingFace
+            </button>
             <button
               onClick={() => void importFromFile()}
               className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 px-2.5 py-1.5 text-xs text-white/80 hover:bg-white/10"
@@ -148,6 +173,7 @@ export function ModelBrowser() {
       </div>
 
       {ramGateModel ? <RamGateDialog model={ramGateModel} /> : null}
+      {hfPanelOpen ? <HfPanel /> : null}
     </div>
   );
 }
@@ -314,6 +340,218 @@ function DownloadRow({
   );
 }
 
+function HfPanel() {
+  const close = useModelBrowserStore((s) => s.closeHfPanel);
+  const query = useModelBrowserStore((s) => s.hfQuery);
+  const setQuery = useModelBrowserStore((s) => s.setHfQuery);
+  const submit = useModelBrowserStore((s) => s.submitHfInput);
+  const searching = useModelBrowserStore((s) => s.hfSearching);
+  const searched = useModelBrowserStore((s) => s.hfSearched);
+  const results = useModelBrowserStore((s) => s.hfResults);
+  const error = useModelBrowserStore((s) => s.hfError);
+  const selectedRepo = useModelBrowserStore((s) => s.hfSelectedRepo);
+  const files = useModelBrowserStore((s) => s.hfFiles);
+  const loadingFiles = useModelBrowserStore((s) => s.hfLoadingFiles);
+  const selectRepo = useModelBrowserStore((s) => s.selectHfRepo);
+  const back = useModelBrowserStore((s) => s.backToHfResults);
+
+  return (
+    <div
+      className="fixed inset-0 z-[210] flex items-center justify-center bg-black/60 p-6"
+      onClick={close}
+    >
+      <div
+        className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#16131f] text-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+          <h2 className="text-base font-semibold">Add from HuggingFace</h2>
+          <button
+            onClick={close}
+            className="rounded-lg p-1.5 text-white/60 hover:bg-white/10 hover:text-white"
+            title="Close"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Search input */}
+        <div className="flex flex-col gap-2 border-b border-white/10 px-5 py-3">
+          <div className="flex items-center gap-2">
+            <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/15 bg-white/5 px-3 py-2">
+              <MagnifyingGlass size={15} className="shrink-0 text-white/40" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void submit();
+                }}
+                placeholder="Search models, or paste a repo (owner/name or URL)"
+                className="flex-1 bg-transparent text-sm text-white placeholder:text-white/30 focus:outline-none"
+              />
+            </div>
+            <button
+              onClick={() => void submit()}
+              disabled={searching || !query.trim()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-400/20 px-3 py-2 text-xs text-amber-100 hover:bg-amber-400/30 disabled:opacity-40"
+            >
+              {searching ? (
+                <CircleNotch size={14} className="animate-spin" />
+              ) : (
+                <MagnifyingGlass size={14} />
+              )}
+              Search
+            </button>
+          </div>
+          <p className="flex items-center gap-1.5 text-[11px] text-white/40">
+            <ShieldCheck size={13} className="text-emerald-300/70" />
+            Only <code className="text-white/60">.gguf</code> files are
+            downloaded, and every model runs locally — nothing is executed on
+            fetch.
+          </p>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-3">
+          {error ? (
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+              <Warning size={14} weight="fill" /> {error}
+            </div>
+          ) : null}
+
+          {selectedRepo ? (
+            <HfFileList
+              repo={selectedRepo}
+              files={files}
+              loading={loadingFiles}
+              onBack={back}
+            />
+          ) : searching ? (
+            <div className="py-10 text-center text-sm text-white/40">
+              Searching HuggingFace…
+            </div>
+          ) : results.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              {results.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => void selectRepo(r.id)}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 text-left hover:bg-white/10"
+                >
+                  <span className="min-w-0 truncate text-sm">{r.id}</span>
+                  <span className="flex shrink-0 items-center gap-3 text-[11px] text-white/40">
+                    <span className="inline-flex items-center gap-1">
+                      <DownloadSimple size={12} /> {formatCount(r.downloads)}
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <Heart size={12} /> {formatCount(r.likes)}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : searched ? (
+            <div className="py-10 text-center text-sm text-white/40">
+              No GGUF models found. Try another search, or paste a repo id.
+            </div>
+          ) : (
+            <div className="py-10 text-center text-sm text-white/40">
+              Search for a model (e.g. “qwen coder”) or paste a HuggingFace repo
+              to see its downloadable files.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HfFileList({
+  repo,
+  files,
+  loading,
+  onBack,
+}: {
+  repo: string;
+  files: HfGgufFile[] | null;
+  loading: boolean;
+  onBack: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onBack}
+          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-white/60 hover:bg-white/10 hover:text-white"
+        >
+          <ArrowLeft size={13} /> Back
+        </button>
+        <span className="min-w-0 truncate text-sm font-medium text-white/80">
+          {repo}
+        </span>
+      </div>
+
+      {loading ? (
+        <div className="py-10 text-center text-sm text-white/40">
+          Loading files…
+        </div>
+      ) : files && files.length > 0 ? (
+        files.map((f) => <HfFileRow key={f.filename} repo={repo} file={f} />)
+      ) : (
+        <div className="py-10 text-center text-sm text-white/40">
+          No .gguf files in this repo.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HfFileRow({ repo, file }: { repo: string; file: HfGgufFile }) {
+  const download = useModelBrowserStore((s) => s.downloads[file.filename]);
+  const isInstalled = useModelBrowserStore((s) => s.isInstalled(file.filename));
+  const cancel = useModelBrowserStore((s) => s.cancel);
+  const downloadHfFile = useModelBrowserStore((s) => s.downloadHfFile);
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="truncate text-sm">{file.filename}</span>
+        <span className="text-[11px] text-white/40">
+          {formatBytes(file.sizeBytes)}
+          {file.sharded ? " · multi-part model" : ""}
+        </span>
+      </div>
+
+      {download ? (
+        <DownloadRow
+          filename={file.filename}
+          onCancel={() => void cancel(file.filename)}
+        />
+      ) : isInstalled ? (
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-400/20 px-2.5 py-1.5 text-xs font-medium text-emerald-200">
+          <CheckCircle size={13} weight="fill" /> Installed
+        </span>
+      ) : file.sharded ? (
+        <span
+          className="inline-flex shrink-0 items-center gap-1 text-[11px] text-white/40"
+          title="Multi-part (sharded) models aren't supported yet — a single shard can't be loaded on its own."
+        >
+          <Warning size={12} weight="fill" /> Unsupported
+        </span>
+      ) : (
+        <button
+          onClick={() => downloadHfFile(repo, file)}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1.5 text-xs text-white hover:bg-white/25"
+        >
+          <DownloadSimple size={13} /> Download
+        </button>
+      )}
+    </div>
+  );
+}
+
 function RamGateDialog({ model }: { model: CuratedModel }) {
   const dismiss = useModelBrowserStore((s) => s.dismissRamGate);
   const confirm = useModelBrowserStore((s) => s.confirmDownload);
@@ -322,7 +560,7 @@ function RamGateDialog({ model }: { model: CuratedModel }) {
 
   return (
     <div
-      className="fixed inset-0 z-[210] flex items-center justify-center bg-black/60 p-6"
+      className="fixed inset-0 z-[220] flex items-center justify-center bg-black/60 p-6"
       onClick={dismiss}
     >
       <div

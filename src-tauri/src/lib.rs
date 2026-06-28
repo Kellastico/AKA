@@ -96,6 +96,8 @@ pub fn run() {
             commands::models::cancel_download,
             commands::models::delete_model,
             commands::models::import_model,
+            commands::models::hf_search_models,
+            commands::models::hf_list_gguf_files,
             hardware::get_hardware_profile,
             hardware::check_ram_for_model,
             sidecar::get_sidecar_status,

@@ -963,6 +963,37 @@ export async function pickGgufFile(): Promise<string | null> {
   return Array.isArray(result) ? (result[0] ?? null) : result;
 }
 
+// HuggingFace discovery — read-only metadata. These only fetch JSON (model ids,
+// file names, sizes) from huggingface.co; the actual weights are pulled by
+// `downloadModel`, which is `.gguf`-only and host-pinned in Rust.
+
+/** A search hit from the HuggingFace model index. */
+export type HfModel = {
+  id: string;
+  downloads: number;
+  likes: number;
+};
+
+/** A `.gguf` file inside a repo, with its real (LFS) size. */
+export type HfGgufFile = {
+  filename: string;
+  sizeBytes: number;
+  /** One shard of a multi-part model — can't be loaded on its own. */
+  sharded: boolean;
+};
+
+/** Search HuggingFace for GGUF models, ranked by downloads (max 30). */
+export async function hfSearchModels(query: string): Promise<HfModel[]> {
+  if (!hasTauri()) return [];
+  return invoke<HfModel[]>("hf_search_models", { query });
+}
+
+/** List the `.gguf` files in a repo. Accepts `owner/name` or a pasted HF URL. */
+export async function hfListGgufFiles(repo: string): Promise<HfGgufFile[]> {
+  if (!hasTauri()) return [];
+  return invoke<HfGgufFile[]>("hf_list_gguf_files", { repo });
+}
+
 /**
  * Call the LLM configured for `projectPath`. The backend reads the runtime
  * block from the project config on every call.

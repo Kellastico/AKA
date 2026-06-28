@@ -138,6 +138,62 @@ fn safe_filename(filename: &str) -> Result<&str, String> {
     Ok(trimmed)
 }
 
+/// Normalize and validate a HuggingFace repo reference into a bare `owner/name`
+/// id. Accepts either `owner/name` or a pasted `https://huggingface.co/owner/name`
+/// URL (with optional `/tree/...`, `/resolve/...`, `/blob/...` suffix).
+///
+/// This is the host-pinning guard: the result is only ever interpolated into a
+/// `https://huggingface.co/...` URL, so we reject anything that isn't a clean
+/// two-segment id of safe characters. That makes it impossible for a pasted
+/// value to redirect a fetch off-host or traverse the API path (`..`).
+fn normalize_repo(input: &str) -> Result<String, String> {
+    let mut s = input.trim();
+
+    // Strip a pasted huggingface.co URL down to its path.
+    for prefix in [
+        "https://huggingface.co/",
+        "http://huggingface.co/",
+        "https://www.huggingface.co/",
+        "huggingface.co/",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    // A pasted URL may carry the host on a different scheme/host — reject those
+    // outright rather than silently treating them as a repo path.
+    if s.contains("://") {
+        return Err("Only huggingface.co repositories are supported".into());
+    }
+
+    // Keep just `owner/name`. Any tail must be a recognized git-ref route
+    // (`/tree/...`, `/resolve/...`, `/blob/...`) from a pasted URL — anything
+    // else (e.g. a stray `host/owner/name`) is rejected rather than silently
+    // truncated to the wrong repo.
+    let segs: Vec<&str> = s.trim_matches('/').split('/').collect();
+    let owner = segs.first().copied().unwrap_or("");
+    let name = segs.get(1).copied().unwrap_or("");
+
+    let valid_seg = |seg: &str| {
+        !seg.is_empty()
+            && seg != ".."
+            && seg != "."
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !valid_seg(owner) || !valid_seg(name) {
+        return Err(format!("Invalid HuggingFace repo: {input:?}"));
+    }
+    if let Some(route) = segs.get(2) {
+        if !matches!(*route, "tree" | "resolve" | "blob" | "raw" | "commit") {
+            return Err(format!("Invalid HuggingFace repo: {input:?}"));
+        }
+    }
+    Ok(format!("{owner}/{name}"))
+}
+
 /// List the `.gguf` files currently in the models directory.
 #[tauri::command]
 pub async fn list_local_models(app: AppHandle) -> Vec<LocalModel> {
@@ -249,6 +305,7 @@ pub async fn download_model(
     filename: String,
     state: State<'_, DownloadState>,
 ) -> Result<(), String> {
+    let repo = normalize_repo(&repo)?;
     let name = safe_filename(&filename)?.to_string();
     let dir = models_dir(&app);
     tokio::fs::create_dir_all(&dir)
@@ -397,9 +454,209 @@ async fn run_download(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// HuggingFace discovery (read-only metadata)
+//
+// These two commands only ever issue read-only `GET`s to `huggingface.co` and
+// return JSON (model ids, file names, sizes). Nothing fetched here is ever
+// written to disk or executed — the only artifact AKA writes is a validated
+// `.gguf` via `download_model`. The repo is host-pinned through `normalize_repo`
+// so a pasted value can never redirect a request off-host.
+// ---------------------------------------------------------------------------
+
+const HF_USER_AGENT: &str = concat!("AKA/", env!("CARGO_PKG_VERSION"));
+
+/// A search hit from the HuggingFace model index.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HfModel {
+    pub id: String,
+    pub downloads: u64,
+    pub likes: u64,
+}
+
+/// A single `.gguf` file inside a repo, with its real (LFS) size.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HfGgufFile {
+    /// Bare filename, e.g. `model-q4_k_m.gguf`.
+    pub filename: String,
+    pub size_bytes: u64,
+    /// True when this is one shard of a multi-part model (`-00001-of-000NN`).
+    /// Such files can't be loaded individually, so the UI disables them.
+    pub sharded: bool,
+}
+
+fn hf_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(HF_USER_AGENT)
+        .build()
+        .map_err(|e| format!("client: {e}"))
+}
+
+/// Search HuggingFace for GGUF models matching `query`, ranked by downloads.
+/// Read-only; returns at most 30 hits.
+#[tauri::command]
+pub async fn hf_search_models(query: String) -> Result<Vec<HfModel>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `filter=gguf` restricts to repos tagged GGUF — the only format AKA loads.
+    let url = "https://huggingface.co/api/models";
+    let client = hf_client()?;
+    let resp = client
+        .get(url)
+        .query(&[
+            ("search", q),
+            ("filter", "gguf"),
+            ("sort", "downloads"),
+            ("direction", "-1"),
+            ("limit", "30"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("search request: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HuggingFace search failed: HTTP {}", resp.status()));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        id: String,
+        #[serde(default)]
+        downloads: u64,
+        #[serde(default)]
+        likes: u64,
+    }
+    let raw: Vec<Raw> = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse search results: {e}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|r| HfModel {
+            id: r.id,
+            downloads: r.downloads,
+            likes: r.likes,
+        })
+        .collect())
+}
+
+/// List the `.gguf` files in a HuggingFace repo with their real sizes.
+/// Accepts an `owner/name` id or a pasted huggingface.co URL.
+#[tauri::command]
+pub async fn hf_list_gguf_files(repo: String) -> Result<Vec<HfGgufFile>, String> {
+    let repo = normalize_repo(&repo)?;
+    // The tree API reports the LFS pointer's real size under `lfs.size`; the
+    // top-level `size` is just the pointer file for LFS-tracked weights.
+    let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=true");
+    let client = hf_client()?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("file-list request: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(format!("Repository not found: {repo}"));
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Could not list files: HTTP {}", resp.status()));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Lfs {
+        size: u64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(rename = "type")]
+        kind: String,
+        path: String,
+        #[serde(default)]
+        size: u64,
+        #[serde(default)]
+        lfs: Option<Lfs>,
+    }
+    let entries: Vec<Entry> = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse file list: {e}"))?;
+
+    let mut out: Vec<HfGgufFile> = entries
+        .into_iter()
+        .filter(|e| e.kind == "file" && e.path.to_ascii_lowercase().ends_with(".gguf"))
+        .filter_map(|e| {
+            // Keep only top-level files (a bare filename) — nested paths can't be
+            // addressed by the `safe_filename`-gated download command anyway.
+            let filename = e.path.rsplit('/').next().unwrap_or(&e.path).to_string();
+            if filename != e.path {
+                return None;
+            }
+            let size_bytes = e.lfs.map(|l| l.size).unwrap_or(e.size);
+            let sharded = is_sharded(&filename);
+            Some(HfGgufFile {
+                filename,
+                size_bytes,
+                sharded,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(out)
+}
+
+/// Detect a multi-part GGUF shard name like `model-00001-of-00002.gguf`.
+fn is_sharded(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.contains("-of-")
+        && lower
+            .split("-of-")
+            .next()
+            .and_then(|p| p.rsplit('-').next())
+            .map(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::safe_filename;
+    use super::{is_sharded, normalize_repo, safe_filename};
+
+    #[test]
+    fn normalizes_bare_and_url_repos() {
+        assert_eq!(normalize_repo("Qwen/Qwen2.5-Coder-7B").unwrap(), "Qwen/Qwen2.5-Coder-7B");
+        assert_eq!(
+            normalize_repo("https://huggingface.co/TheBloke/Llama-3-8B-GGUF").unwrap(),
+            "TheBloke/Llama-3-8B-GGUF"
+        );
+        assert_eq!(
+            normalize_repo("huggingface.co/owner/name/tree/main").unwrap(),
+            "owner/name"
+        );
+        assert_eq!(
+            normalize_repo("https://huggingface.co/owner/name/resolve/main/model.gguf").unwrap(),
+            "owner/name"
+        );
+    }
+
+    #[test]
+    fn rejects_off_host_and_traversal_repos() {
+        assert!(normalize_repo("https://evil.com/owner/name").is_err());
+        assert!(normalize_repo("evil.com/owner/name").is_err()); // 3 segments
+        assert!(normalize_repo("../../etc/passwd").is_err());
+        assert!(normalize_repo("owner/..").is_err());
+        assert!(normalize_repo("just-owner").is_err());
+        assert!(normalize_repo("").is_err());
+        assert!(normalize_repo("own er/na me").is_err());
+    }
+
+    #[test]
+    fn detects_sharded_files() {
+        assert!(is_sharded("model-00001-of-00002.gguf"));
+        assert!(is_sharded("Big-Model-Q4_K_M-00001-of-00009.gguf"));
+        assert!(!is_sharded("model-q4_k_m.gguf"));
+        assert!(!is_sharded("deepseek-of-something.gguf"));
+    }
 
     #[test]
     fn accepts_bare_gguf_name() {
