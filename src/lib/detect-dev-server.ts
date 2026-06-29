@@ -22,6 +22,29 @@ const STATIC_HTML_SERVER: DetectedDevServer = {
 };
 
 /**
+ * A Vite config in the root is authoritative: the project's `index.html` is an
+ * entry that Vite must transform (it pulls in `/src/main.*` module scripts that
+ * don't exist as plain files). Serving it with the static-HTML server would
+ * 404 the entry and render a blank page — so a Vite config must win over the
+ * static fallback. `npx vite` runs the locally-installed binary and serves on
+ * Vite's own port (5173 by default), honoring the config.
+ */
+const VITE_CONFIG_NAMES = [
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.ts",
+  "vite.config.cjs",
+  "vite.config.mts",
+  "vite.config.cts",
+];
+
+const VITE_SERVER: DetectedDevServer = {
+  cmd: "npx",
+  args: ["vite"],
+  reason: "Vite project (vite.config) — Vite dev server on localhost:5173",
+};
+
+/**
  * Inspect the project root and pick a sensible dev-server command. Used by
  * the first-run prompt so users with little-to-no coding experience never
  * have to guess the right invocation for their project type.
@@ -43,6 +66,7 @@ export async function detectDevServer(
     return null;
   }
   const names = new Set(entries.map((e) => e.name));
+  const hasVite = VITE_CONFIG_NAMES.some((n) => names.has(n));
 
   // ---- Node ----
   // Read scripts so we pick "dev" / "start" / "serve" intelligently rather
@@ -69,8 +93,13 @@ export async function detectDevServer(
     } catch {
       // Malformed/unreadable package.json — fall through to the checks below.
     }
-    // No runnable script found (or the manifest couldn't be parsed). A
-    // package.json with no dev/start/serve script is common in otherwise-static
+    // No runnable script found (or the manifest couldn't be parsed). Before the
+    // static-HTML fallback, honor a Vite config: a Vite app's index.html is an
+    // entry Vite must transform, so serving it statically would render blank.
+    if (hasVite) {
+      return VITE_SERVER;
+    }
+    // A package.json with no dev/start/serve script is common in otherwise-static
     // projects — a stray manifest for a linter/formatter, an unfinished
     // scaffold, etc. Blindly running `npm run dev` there just errors with
     // "Missing script: dev", so if the folder is serveable as static HTML
@@ -123,6 +152,13 @@ export async function detectDevServer(
   }
   if (names.has("Cargo.toml")) {
     return { cmd: "cargo", args: ["run"], reason: "Rust crate (Cargo.toml)" };
+  }
+
+  // ---- Vite without a package.json ----
+  // A vite.config with no package.json (deps not installed yet, a subfolder
+  // opened, a minimal scaffold) still means "run Vite" — not static serving.
+  if (hasVite) {
+    return VITE_SERVER;
   }
 
   // ---- Static HTML fallback ----

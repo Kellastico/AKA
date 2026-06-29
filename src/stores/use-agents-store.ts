@@ -45,6 +45,28 @@ const CUSTOM_AGENT: Agent = {
   providesTools: [],
 };
 
+/**
+ * The explicit "no agent" choice. For users whose agentic logic lives on the
+ * model side — an ICM / SAFE framework wrapping the LLM, or any setup that
+ * isn't a Python agent subprocess — AKA attaches nothing and relays the task
+ * straight to the model (`bin: ""`, `llmOwnership: "aka"`). Unlike the blank
+ * "Custom script" escape hatch, this is a deliberate, runnable end-state, not a
+ * prompt to go configure a runner. It pairs with Chat Only / Edit modes;
+ * Execute has no subprocess to dispatch.
+ */
+export const NONE_AGENT: Agent = {
+  id: "none",
+  name: "None",
+  description: "No agent — AKA sends your task straight to the model",
+  expectedRamMB: 0,
+  bin: "",
+  args: [],
+  install: null,
+  installed: true,
+  llmOwnership: "aka",
+  providesTools: [],
+};
+
 type AgentsState = {
   agents: Agent[];
   selectedAgentId: string;
@@ -63,10 +85,10 @@ type AgentsState = {
   updateAgent: (id: string, patch: Partial<Agent>) => void;
 };
 
-// AKA ships no agent catalog, so the picker starts with only the blank
-// escape-hatch entry. Real agents are appended once the user's saved agents
-// are reconciled (see `reconcile`).
-const initialAgents: Agent[] = [CUSTOM_AGENT];
+// AKA ships no agent catalog, so the picker starts with only the "None" choice
+// and the blank escape-hatch entry. Real agents are appended once the user's
+// saved agents are reconciled (see `reconcile`).
+const initialAgents: Agent[] = [NONE_AGENT, CUSTOM_AGENT];
 
 /**
  * Convert a saved CustomAgent into the unified Agent shape, folding in the
@@ -101,8 +123,9 @@ async function reconcile(
   const detectedMap = new Map<string, DetectedAgent>(
     detected.map((d) => [d.bin, d]),
   );
-  // Order: user-saved agents → blank "Custom Script" escape hatch.
+  // Order: "None" → user-saved agents → blank "Custom Script" escape hatch.
   return [
+    NONE_AGENT,
     ...customs.map((c) => fromCustomAgent(c, detectedMap.get(c.bin))),
     CUSTOM_AGENT,
   ];

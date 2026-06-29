@@ -262,6 +262,39 @@ pub async fn import_model(app: AppHandle, src_path: String) -> Result<String, St
     Ok(name)
 }
 
+/// The absolute path of the models directory, for display in the UI so users
+/// know where their downloads live without spelunking the OS app-data tree.
+#[tauri::command]
+pub fn models_dir_path(app: AppHandle) -> String {
+    models_dir(&app).to_string_lossy().to_string()
+}
+
+/// Reveal the models directory in the OS file manager (Finder / Explorer /
+/// Files). Creates it first so the reveal never fails on a fresh install where
+/// nothing has been downloaded yet. This is the "one central folder" entry
+/// point — every model AKA downloads or imports lands here.
+#[tauri::command]
+pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
+    let dir = models_dir(&app);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    let (bin, args): (&str, Vec<&str>) = ("open", vec![path.as_str()]);
+    #[cfg(target_os = "linux")]
+    let (bin, args): (&str, Vec<&str>) = ("xdg-open", vec![path.as_str()]);
+    #[cfg(target_os = "windows")]
+    let (bin, args): (&str, Vec<&str>) = ("explorer", vec![path.as_str()]);
+
+    tokio::process::Command::new(bin)
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("failed to open file manager: {e}"))?;
+    Ok(())
+}
+
 /// Delete a downloaded model file.
 #[tauri::command]
 pub async fn delete_model(app: AppHandle, filename: String) -> Result<(), String> {

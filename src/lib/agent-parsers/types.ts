@@ -42,7 +42,14 @@ export type AgentEvent =
   | { type: "reasoning_start" }
   | { type: "reasoning_delta"; text: string }
   | { type: "reasoning_end" }
-  | { type: "text"; text: string };
+  | { type: "text"; text: string }
+  /**
+   * Live context-usage report from the agent. AKA can't see the agent
+   * subprocess's real prompt (system prompt + scratchpad + tool observations),
+   * so the agent self-reports its actual token usage to drive the host's
+   * context meter accurately. Control-plane only — never rendered as content.
+   */
+  | { type: "context"; usedTokens: number; contextWindow: number };
 
 /**
  * Stateful line-by-line parser. Implementations buffer partial state

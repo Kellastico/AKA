@@ -27,8 +27,21 @@ type TokenCounterState = {
   status: TokenStatus;
   /** Set true once the 90% toast has fired for the current session/model. */
   warned: boolean;
+  /**
+   * Live override from a running agent. AKA's own count only sees the visible
+   * transcript; an agent's real prompt (system prompt + scratchpad + tool
+   * observations) lives in the subprocess and is far larger. While set, the
+   * meter reflects these self-reported numbers instead of the estimate. Fed by
+   * `@@aka {"event":"context"}` markers; cleared at each new submit and on
+   * session clear.
+   */
+  agentContext: { used: number; limit: number } | null;
 
   refresh: () => Promise<void>;
+  /** Drive the meter from a running agent's real usage. */
+  setAgentContext: (usedTokens: number, contextWindow: number) => void;
+  /** Drop the agent override and fall back to the transcript estimate. */
+  clearAgentContext: () => void;
   reset: () => void;
 };
 
@@ -46,15 +59,46 @@ function classify(ratio: number): TokenStatus {
 let cachedLimitKey = "";
 let cachedLimit = 0;
 
+/** Commit a (used, limit) reading: derive ratio + status and fire the one-time
+ *  90% toast. Shared by the transcript estimate and the live agent override. */
+function applyReading(
+  set: (partial: Partial<TokenCounterState>) => void,
+  prevWarned: boolean,
+  used: number,
+  limit: number,
+): void {
+  const ratio = limit > 0 ? used / limit : 0;
+  const status = classify(ratio);
+  const crossed90 = !prevWarned && ratio >= 0.9;
+  set({ used, limit, ratio, status, warned: prevWarned || crossed90 });
+  if (crossed90) {
+    useRuntimeStore.getState().pushToast({
+      kind: "info",
+      text: "Approaching context limit. Consider starting a new session or the summary may be cut off.",
+    });
+  }
+}
+
 export const useTokenCounterStore = create<TokenCounterState>((set, get) => ({
   used: 0,
   limit: 32_768,
   ratio: 0,
   status: "ok",
   warned: false,
+  agentContext: null,
 
   refresh: async () => {
     try {
+      // Live agent override wins: trust the running agent's self-reported usage
+      // over the visible-transcript estimate, and keep streaming message-append
+      // refreshes from clobbering it back down to the estimate.
+      const override = get().agentContext;
+      if (override) {
+        const limit = override.limit > 0 ? override.limit : get().limit;
+        applyReading(set, get().warned, override.used, limit);
+        return;
+      }
+
       const messages = useMessagesStore.getState().messages;
       const rt = useRuntimeStore.getState();
       const modelId = rt.selectedModelId ?? "";
@@ -85,27 +129,7 @@ export const useTokenCounterStore = create<TokenCounterState>((set, get) => ({
       const used =
         chatMessages.length === 0 ? 0 : await countTokens(chatMessages);
 
-      const ratio = limit > 0 ? used / limit : 0;
-      const status = classify(ratio);
-
-      const prev = get();
-      const crossed90 =
-        !prev.warned && status !== "ok" && status !== "warn" && ratio >= 0.9;
-
-      set({
-        used,
-        limit,
-        ratio,
-        status,
-        warned: prev.warned || crossed90,
-      });
-
-      if (crossed90) {
-        useRuntimeStore.getState().pushToast({
-          kind: "info",
-          text: "Approaching context limit. Consider starting a new session or the summary may be cut off.",
-        });
-      }
+      applyReading(set, get().warned, used, limit);
     } catch (err) {
       // Token-counter failures are non-fatal — leave the previous reading in
       // place and log. An unhandled rejection here during a swap can blank
@@ -115,5 +139,19 @@ export const useTokenCounterStore = create<TokenCounterState>((set, get) => ({
     }
   },
 
-  reset: () => set({ used: 0, ratio: 0, status: "ok", warned: false }),
+  setAgentContext: (usedTokens, contextWindow) => {
+    const limit = contextWindow > 0 ? contextWindow : get().limit;
+    set({ agentContext: { used: usedTokens, limit } });
+    applyReading(set, get().warned, usedTokens, limit);
+  },
+
+  clearAgentContext: () => {
+    if (!get().agentContext) return;
+    set({ agentContext: null });
+    // Resume the visible-transcript estimate immediately.
+    void get().refresh();
+  },
+
+  reset: () =>
+    set({ used: 0, ratio: 0, status: "ok", warned: false, agentContext: null }),
 }));

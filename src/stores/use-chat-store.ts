@@ -6,6 +6,7 @@ import { useAgentsStore } from "./use-agents-store";
 import { useAttachmentsStore } from "./use-attachments-store";
 import { useProjectConfigStore } from "./use-project-config-store";
 import { useProjectsStore } from "./use-projects-store";
+import { useTokenCounterStore } from "./use-token-counter-store";
 import {
   builtinEndpoint,
   useRuntimeStore,
@@ -675,6 +676,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const projectPath =
       ps.projects.find((p) => p.id === ps.activeProjectId)?.path ?? "";
 
+    // Each turn starts from the transcript estimate; an agent run then drives the
+    // meter live via `@@aka {"event":"context"}` markers. Clearing here means a
+    // direct (None/Ask/Edit) turn after an agent run reverts to the estimate
+    // rather than showing the agent's stale last reading.
+    useTokenCounterStore.getState().clearAgentContext();
+
     // Auto-name the active session from the first user prompt of that
     // session. Only fires while the title is still the placeholder so users
     // who renamed don't get overwritten.
@@ -1152,6 +1159,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   appendReasoning(event.text + "\n");
                 } else if (event.type === "reasoning_end") {
                   closeReasoning();
+                } else if (event.type === "context") {
+                  // The agent self-reports its REAL prompt size (which AKA can't
+                  // see inside the subprocess) — drive the live context meter
+                  // from it instead of the visible-transcript estimate.
+                  useTokenCounterStore
+                    .getState()
+                    .setAgentContext(event.usedTokens, event.contextWindow);
                 } else {
                   // text → count chars for TPS, then route through <think> parser
                   agentCharCount += event.text.length;

@@ -8,7 +8,7 @@ import {
   useChatStore,
 } from "../../stores/use-chat-store";
 import { useAttachmentsStore } from "../../stores/use-attachments-store";
-import { useAgentsStore } from "../../stores/use-agents-store";
+import { NONE_AGENT, useAgentsStore } from "../../stores/use-agents-store";
 import { useProjectsStore } from "../../stores/use-projects-store";
 import { useProjectConfigStore } from "../../stores/use-project-config-store";
 import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
@@ -81,11 +81,13 @@ export function ChatBoxFooter({ compact }: { compact: boolean }) {
             ? "Context limit reached. Swap your model or start a new session."
             : !agent
               ? "Pick an agent"
-              : needsAgentInstalled && !agent.installed
-                ? `${agent.name} isn't installed`
-                : !projectAgentBound
-                  ? "Re-pick the agent — this project's config is empty"
-                  : "Send";
+              : agent.id === NONE_AGENT.id && mode === "agent"
+                ? "“None” has no agent to run — switch to Chat or Edit mode"
+                : needsAgentInstalled && !agent.installed
+                  ? `${agent.name} isn't installed`
+                  : !projectAgentBound
+                    ? "Re-pick the agent — this project's config is empty"
+                    : "Send";
 
   return (
     <>

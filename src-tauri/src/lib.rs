@@ -98,6 +98,8 @@ pub fn run() {
             commands::models::import_model,
             commands::models::hf_search_models,
             commands::models::hf_list_gguf_files,
+            commands::models::models_dir_path,
+            commands::models::open_models_folder,
             hardware::get_hardware_profile,
             hardware::check_ram_for_model,
             sidecar::get_sidecar_status,

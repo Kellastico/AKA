@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { PencilSimple, Plus, Robot } from "@phosphor-icons/react";
+import { Check, PencilSimple, Plus, Prohibit, Robot } from "@phosphor-icons/react";
 import { Popover } from "../Popover";
-import { useAgentsStore, type Agent } from "../../stores/use-agents-store";
+import {
+  NONE_AGENT,
+  useAgentsStore,
+  type Agent,
+} from "../../stores/use-agents-store";
 import { useActiveSessionRunning } from "../../stores/use-chat-store";
 import { useSessionStore } from "../../stores/use-session-store";
 import { useMessagesStore } from "../../stores/use-messages-store";
@@ -152,10 +156,19 @@ export function AgentPicker({ compact }: { compact?: boolean }) {
           />
         ) : (
           <>
+            {/* "None" — no agent subprocess; AKA relays to the model. Always
+                offered, above any registered agents, for ICM/SAFE-style setups
+                where the agentic layer lives on the model side. */}
+            <NoneRow
+              selected={selectedId === NONE_AGENT.id}
+              onPick={() => switchTo(NONE_AGENT.id)}
+            />
+
             {visibleAgents.length === 0 ? (
               <div className="px-3 py-3 text-xs text-white/55">
-                No agents registered yet. Add the agent you use below — AKA
-                detects it on your PATH and runs it.
+                No agents registered yet. Pick “None” to run the model directly,
+                or add the agent you use below — AKA detects it on your PATH and
+                runs it.
               </div>
             ) : (
               <div className="flex flex-col gap-1">
@@ -185,6 +198,38 @@ export function AgentPicker({ compact }: { compact?: boolean }) {
         )}
       </Popover>
     </>
+  );
+}
+
+/**
+ * The "None" row — selecting it means no agent subprocess; AKA talks to the
+ * model directly. Visually set apart from registered agents (its own icon, no
+ * edit affordance) so it reads as a mode of operation, not a tool to install.
+ */
+function NoneRow({
+  selected,
+  onPick,
+}: {
+  selected: boolean;
+  onPick: () => void;
+}) {
+  return (
+    <button
+      onClick={onPick}
+      className={[
+        "flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-left transition-colors",
+        selected ? "bg-white/12" : "hover:bg-white/8",
+      ].join(" ")}
+    >
+      <Prohibit size={14} className="shrink-0 text-white/55" />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm text-white/90">{NONE_AGENT.name}</span>
+        <span className="truncate text-[11px] text-white/45">
+          {NONE_AGENT.description}
+        </span>
+      </div>
+      {selected && <Check size={13} className="shrink-0 text-white/70" />}
+    </button>
   );
 }
 

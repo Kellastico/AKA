@@ -944,6 +944,18 @@ export async function deleteModel(filename: string): Promise<void> {
   return invoke("delete_model", { filename });
 }
 
+/** Absolute path of the models directory, for display. Empty in the browser. */
+export async function modelsDirPath(): Promise<string> {
+  if (!hasTauri()) return "";
+  return invoke<string>("models_dir_path");
+}
+
+/** Reveal the models directory in the OS file manager (creates it if absent). */
+export async function openModelsFolder(): Promise<void> {
+  if (!hasTauri()) return;
+  return invoke("open_models_folder");
+}
+
 /** Copy an arbitrary local `.gguf` into the models directory. Returns the
  *  destination filename. */
 export async function importModel(srcPath: string): Promise<string> {

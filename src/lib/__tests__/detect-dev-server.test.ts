@@ -63,6 +63,42 @@ describe("detectDevServer", () => {
     expect(d?.reason).toMatch(/index\.html/i);
   });
 
+  // The #3 regression: a Vite project carries index.html + a vite.config, but if
+  // its package.json has no literal dev/start/serve script the old detector
+  // served index.html via Python on :8000 — which 404s Vite's /src entry. A vite
+  // config must win over the static fallback.
+  it("runs Vite (not static :8000) for a vite.config with no runnable npm script", async () => {
+    mockListDir.mockResolvedValue(
+      entries("package.json", "index.html", "vite.config.mjs"),
+    );
+    pkgJson({ scripts: { build: "vite build" } }); // build only — nothing runnable
+
+    const d = await detectDevServer("/proj");
+    expect(d?.cmd).toBe("npx");
+    expect(d?.args).toEqual(["vite"]);
+    expect(d?.reason).toMatch(/vite/i);
+  });
+
+  it("still prefers a real npm dev script over npx vite when one exists", async () => {
+    mockListDir.mockResolvedValue(
+      entries("package.json", "index.html", "vite.config.ts"),
+    );
+    pkgJson({ scripts: { dev: "vite" } });
+
+    const d = await detectDevServer("/proj");
+    expect(d?.cmd).toBe("npm");
+    expect(d?.args).toEqual(["run", "dev"]);
+  });
+
+  it("runs Vite for a vite.config even with no package.json at all", async () => {
+    mockListDir.mockResolvedValue(entries("index.html", "vite.config.js", "src"));
+
+    const d = await detectDevServer("/proj");
+    expect(d?.cmd).toBe("npx");
+    expect(d?.args).toEqual(["vite"]);
+    expect(mockReadTextFile).not.toHaveBeenCalled();
+  });
+
   it("treats a package.json with no scripts key the same way", async () => {
     mockListDir.mockResolvedValue(entries("package.json", "index.html"));
     pkgJson({ name: "site" }); // no scripts at all

@@ -47,6 +47,10 @@ type Marker = {
   /** Handshake markers (`{"announce":"capability-contract",…}`) — not a tool
    *  call. Consumed silently so the contract never shows as chat or a tool row. */
   announce?: string;
+  /** Control-plane events, e.g. `{"event":"context",…}` — not a tool call. */
+  event?: string;
+  used_tokens?: number;
+  context_window?: number;
   tool?: string;
   name?: string;
   path?: string;
@@ -73,6 +77,20 @@ export function createProtocolParser(): AgentParser {
       // Capability-contract / handshake markers are control plane, not a tool
       // call — consume them so the contract JSON never lands in the chat.
       if (j.announce !== undefined) return [];
+
+      // Live context-usage report: the agent tells the host its REAL prompt size
+      // (which the host can't see inside the subprocess) so the context meter is
+      // accurate during a run. Control plane — never a tool card.
+      if (j.event === "context") {
+        const usedTokens = j.used_tokens;
+        if (typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0) {
+          const cw = j.context_window;
+          const contextWindow =
+            typeof cw === "number" && Number.isFinite(cw) && cw > 0 ? cw : 0;
+          return [{ type: "context", usedTokens, contextWindow }];
+        }
+        return [];
+      }
 
       const kind = toKind(j.tool);
       const name =

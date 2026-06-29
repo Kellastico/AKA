@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
@@ -6,6 +7,7 @@ import {
   Cube,
   DownloadSimple,
   FilePlus,
+  FolderOpen,
   Heart,
   MagnifyingGlass,
   ShieldCheck,
@@ -20,7 +22,11 @@ import {
 } from "./use-model-browser-store";
 import { formatContext, type CuratedModel } from "./curated-models";
 import { useRuntimeStore } from "./use-runtime-store";
-import type { HfGgufFile } from "../../lib/tauri/commands";
+import {
+  modelsDirPath,
+  openModelsFolder,
+  type HfGgufFile,
+} from "../../lib/tauri/commands";
 
 const FILTERS: { id: ModelFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -79,6 +85,13 @@ export function ModelBrowser() {
   const hfPanelOpen = useModelBrowserStore((s) => s.hfPanelOpen);
   const hardware = useRuntimeStore((s) => s.hardware);
 
+  // The on-disk models folder, shown so users know where downloads live and can
+  // jump straight to it. Loaded when the browser opens (no-op in the browser).
+  const [modelsPath, setModelsPath] = useState("");
+  useEffect(() => {
+    if (open) void modelsDirPath().then(setModelsPath).catch(() => {});
+  }, [open]);
+
   if (!open) return null;
 
   const models = allBrowserModels(localModels);
@@ -107,7 +120,7 @@ export function ModelBrowser() {
               className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 text-xs text-amber-100 hover:bg-amber-400/20"
             >
               <MagnifyingGlass size={14} />
-              Add from HuggingFace
+              Add Model (via Huggingface)
             </button>
             <button
               onClick={() => void importFromFile()}
@@ -140,6 +153,21 @@ export function ModelBrowser() {
             </span>
           )}
         </div>
+
+        {/* Where downloads live — click to reveal in the OS file manager. */}
+        {modelsPath ? (
+          <button
+            onClick={() => void openModelsFolder()}
+            className="group flex w-full items-center gap-1.5 border-b border-white/10 px-5 py-1.5 text-left text-[11px] text-white/40 hover:bg-white/5 hover:text-white/70"
+            title="Open in file manager"
+          >
+            <FolderOpen size={12} className="shrink-0" />
+            <span className="shrink-0">Saved to</span>
+            <span className="truncate font-mono text-white/55 group-hover:text-white/80">
+              {modelsPath}
+            </span>
+          </button>
+        ) : null}
 
         {/* Filter pills */}
         <div className="flex gap-1.5 px-5 py-3">
@@ -366,7 +394,7 @@ function HfPanel() {
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
-          <h2 className="text-base font-semibold">Add from HuggingFace</h2>
+          <h2 className="text-base font-semibold">Add Model (via Huggingface)</h2>
           <button
             onClick={close}
             className="rounded-lg p-1.5 text-white/60 hover:bg-white/10 hover:text-white"

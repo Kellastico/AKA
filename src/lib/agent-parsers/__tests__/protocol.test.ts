@@ -59,6 +59,22 @@ describe("createProtocolParser", () => {
     });
     expect(p.feed("@@aka {bad json}")).toEqual([]);
   });
+
+  it("emits a context event for a live usage marker (not a tool card)", () => {
+    const p = createProtocolParser();
+    expect(
+      p.feed('@@aka {"event":"context","used_tokens":25000,"context_window":32768}'),
+    ).toEqual([{ type: "context", usedTokens: 25000, contextWindow: 32768 }]);
+  });
+
+  it("tolerates a context marker with a missing/invalid window (0)", () => {
+    const p = createProtocolParser();
+    expect(p.feed('@@aka {"event":"context","used_tokens":900}')).toEqual([
+      { type: "context", usedTokens: 900, contextWindow: 0 },
+    ]);
+    // No usable used_tokens → consumed silently, never a card.
+    expect(p.feed('@@aka {"event":"context","context_window":32768}')).toEqual([]);
+  });
 });
 
 describe("composeParsers / parserForAgent", () => {
