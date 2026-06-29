@@ -1,6 +1,6 @@
 ## AKA 1.4.0
 
-This release opens up **the zero-setup, bring-any-model path** — search and download the newest models straight from HuggingFace, run them with no agent at all if your stack lives on the model side, and find everything you've downloaded in one place. Plus a fix so Vite projects preview correctly, and the first signed & notarized macOS build.
+This release opens up **the zero-setup, bring-any-model path** — search and download the newest models straight from HuggingFace, run them with no agent at all if your stack lives on the model side, and find everything you've downloaded in one place. Plus a fix so Vite projects preview correctly.
 
 ### ✨ New — Add any model from HuggingFace
 - **Search or paste, then download.** The Models browser has an **Add Model (via Huggingface)** panel: search the GGUF catalog (ranked by popularity) **or** paste a repo (`owner/name` or a full `huggingface.co/…` URL), pick a quant (Q4/Q6/Q8…), and it downloads into the built-in runtime exactly like a curated model — same progress, RAM gate, and one-click load.
@@ -18,9 +18,6 @@ The HuggingFace path is deliberately narrow: **host-pinned to huggingface.co** (
 ### 🔧 Fixed
 - **Vite projects preview correctly.** The dev-server detector ignored `vite.config.*`, so a Vite app (which has a root `index.html`) could fall back to a Python static server on `:8000` — which 404s Vite's `/src` entry and renders blank. A `vite.config.{js,mjs,ts,cjs,mts,cts}` now takes precedence and runs the Vite dev server (localhost:5173); a real `npm run dev` script still wins when present.
 
-### 🔏 Changed — macOS builds are signed & notarized
-First release built with **Developer ID signing + notarization**. On a clean Mac the `.dmg` should open normally — no more "disk image is damaged" and no right-click → Open dance. (Fallback below still works if a download was interrupted or on older macOS.)
-
 ### 🔭 Under the hood
 - The context-usage meter can now reflect an **agent's real prompt size** when the agent reports it live, instead of only estimating from the visible transcript.
 
@@ -31,6 +28,6 @@ First release built with **Developer ID signing + notarization**. On a clean Mac
 - **Windows** → `AKA_1.4.0_x64-setup.exe`
 - **Linux** → `AKA_1.4.0_amd64.AppImage` (portable) · `AKA_1.4.0_amd64.deb` (Debian/Ubuntu) · `AKA-1.4.0-1.x86_64.rpm` (Fedora/RHEL)
 
-macOS is now notarized — drag to Applications and open. If a download was interrupted and Gatekeeper still complains, run `xattr -dr com.apple.quarantine /Applications/AKA.app`. On **Windows**, if SmartScreen warns, **More info → Run anyway**. The Linux `.AppImage` needs the executable bit: `chmod +x AKA_1.4.0_amd64.AppImage`.
+This macOS build is **unsigned** (Developer ID signing returns next release). On **macOS**, right-click → **Open** the first time, or if Gatekeeper says the app is damaged run `xattr -dr com.apple.quarantine /Applications/AKA.app`. On **Windows**, if SmartScreen warns, **More info → Run anyway**. The Linux `.AppImage` needs the executable bit: `chmod +x AKA_1.4.0_amd64.AppImage`.
 
 **Compare:** https://github.com/Kellastico/AKA/compare/v1.3.6...v1.4.0
