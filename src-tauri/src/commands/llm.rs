@@ -267,6 +267,160 @@ struct ChatRequest<'a> {
     messages: &'a [Message],
 }
 
+// ---------- Native tool-calling (the built-in "None" agent loop) ----------
+
+/// One tool advertised to the model — the OpenAI `tools` entry shape. Built
+/// host-side from the capability catalog (see `tools::loop_tools`); the frontend
+/// never invents these, so the model can only ever be offered house tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolFunctionDef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFunctionDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the call arguments.
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call the model emitted, exactly as the provider returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    /// Raw JSON string of arguments, as the provider returns it.
+    #[serde(default)]
+    pub arguments: String,
+}
+
+/// One assistant turn in the tool loop: final text (when done), any tool calls
+/// to execute, and reasoning (for the witness timeline). Exactly one of
+/// `content` / `tool_calls` is normally populated per turn.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTurn {
+    pub content: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolChatRequest<'a> {
+    model: &'a str,
+    /// Raw OpenAI message objects, so the frontend can carry the full loop
+    /// history (assistant `tool_calls`, `tool` results) without each variant
+    /// being rigidly typed here.
+    messages: &'a [serde_json::Value],
+    tools: &'a [ToolDef],
+    tool_choice: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolChatResponse {
+    choices: Vec<ToolChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolChatChoice {
+    message: ToolChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolChatMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCall>>,
+    // Providers expose streamed-thinking under different keys when non-streamed.
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+/// Run one non-streamed tool-calling turn against the project's runtime. This is
+/// the native half of the built-in "None" agent: AKA supplies the `tools`, the
+/// model either calls one or returns a final answer, and the frontend loop drives
+/// the rest. Non-streamed on purpose — assembling streamed `tool_calls` deltas is
+/// brittle across local runtimes, and a tool turn has no user-visible streaming
+/// value (the final answer turn still streams via `call_llm_stream`).
+///
+/// Cloud egress is gated exactly like every other LLM call (`gate_egress`), so the
+/// loop never reaches a non-allowlisted remote endpoint.
+#[tauri::command]
+pub async fn call_llm_tools(
+    app: AppHandle,
+    messages: Vec<serde_json::Value>,
+    tools: Vec<ToolDef>,
+    project_path: String,
+    model: Option<String>,
+) -> Result<AssistantTurn, AppError> {
+    if project_path.trim().is_empty() {
+        return Err(AppError::RuntimeOffline);
+    }
+    let cfg = load_from_disk(&project_path).await?;
+    gate_egress(&app, &cfg.runtime.base_url, &cfg.capabilities)?;
+    let runtime = cfg.runtime;
+    let model_id = model.filter(|m| !m.is_empty()).unwrap_or(runtime.model);
+    if model_id.is_empty() {
+        return Err(AppError::RuntimeOffline);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|_| AppError::RuntimeOffline)?;
+
+    let mut req = client
+        .post(format!(
+            "{}/chat/completions",
+            runtime.base_url.trim_end_matches('/')
+        ))
+        .json(&ToolChatRequest {
+            model: &model_id,
+            messages: &messages,
+            tools: &tools,
+            tool_choice: "auto",
+        });
+    if let Some(key) = runtime.api_key.as_deref() {
+        if !key.is_empty() {
+            req = req.bearer_auth(key);
+        }
+    }
+
+    let resp = req.send().await.map_err(|_| AppError::RuntimeOffline)?;
+    if !resp.status().is_success() {
+        return Err(AppError::RuntimeOffline);
+    }
+    let body: ToolChatResponse = resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
+    let msg = body
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message)
+        .ok_or(AppError::RuntimeOffline)?;
+
+    let content = msg.content.as_deref().map(strip_think).filter(|s| !s.is_empty());
+    let reasoning = msg.reasoning.or(msg.reasoning_content).filter(|s| !s.trim().is_empty());
+    Ok(AssistantTurn {
+        content,
+        tool_calls: msg.tool_calls.unwrap_or_default(),
+        reasoning,
+    })
+}
+
 /// A local runtime we know how to look for. `base_url` is its published default
 /// OpenAI-compatible endpoint; `binaries` / `app_bundles` are the signals that
 /// tell us it's *installed* even when it isn't running, so the UI can hide

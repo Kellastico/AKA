@@ -45,8 +45,20 @@ function toKind(t: unknown): ToolKind {
 
 type Marker = {
   /** Handshake markers (`{"announce":"capability-contract",…}`) — not a tool
-   *  call. Consumed silently so the contract never shows as chat or a tool row. */
+   *  call. Carry the same capability fields a `--äkä-probe` answer does; surfaced
+   *  as a `capabilities` event (the in-band fallback), never as chat or a row. */
   announce?: string;
+  manages_llm?: boolean;
+  supports_streaming?: boolean;
+  supports_dry_run?: boolean;
+  required_args?: string[];
+  "capability-contract"?: string | null;
+  capability_folders?: string[];
+  /** Host-action control marker, e.g. `{"control":"dev_server","action":"restart"}`
+   *  — lets the agent drive a host capability (currently the dev server) instead
+   *  of the user clicking the button. Not a tool call. */
+  control?: string;
+  action?: string;
   /** Control-plane events, e.g. `{"event":"context",…}` — not a tool call. */
   event?: string;
   used_tokens?: number;
@@ -60,6 +72,8 @@ type Marker = {
   phase?: "start" | "end";
   linesAdded?: number;
   linesRemoved?: number;
+  /** Host witness: SHA-256 of the real post-edit content (recorded change). */
+  hash?: string;
 };
 
 export function createProtocolParser(): AgentParser {
@@ -74,9 +88,46 @@ export function createProtocolParser(): AgentParser {
         return []; // malformed marker — drop it, never throw or leak as prose
       }
 
+      // Host-action control marker — the agent asks the host to drive a
+      // capability (open/kill/restart the dev server) instead of the user
+      // clicking the button. Surfaced as a `control` event the chat store acts
+      // on; never a tool row or chat prose.
+      if (typeof j.control === "string" && j.control.length > 0) {
+        return [
+          {
+            type: "control",
+            target: j.control,
+            action: typeof j.action === "string" ? j.action : "",
+          },
+        ];
+      }
+
       // Capability-contract / handshake markers are control plane, not a tool
-      // call — consume them so the contract JSON never lands in the chat.
-      if (j.announce !== undefined) return [];
+      // call. Surface the advertised capabilities as a `capabilities` event (the
+      // in-band fallback for `--äkä-probe`) so the host can cache them for the
+      // session; the raw JSON itself never lands in the chat or as a tool row.
+      if (j.announce !== undefined) {
+        return [
+          {
+            type: "capabilities",
+            probe: {
+              type: "agent",
+              name: typeof j.name === "string" ? j.name : "",
+              manages_llm: j.manages_llm === true,
+              supports_streaming: j.supports_streaming === true,
+              supports_dry_run: j.supports_dry_run === true,
+              required_args: Array.isArray(j.required_args) ? j.required_args : [],
+              "capability-contract":
+                typeof j["capability-contract"] === "string"
+                  ? j["capability-contract"]
+                  : null,
+              capability_folders: Array.isArray(j.capability_folders)
+                ? j.capability_folders
+                : [],
+            },
+          },
+        ];
+      }
 
       // Live context-usage report: the agent tells the host its REAL prompt size
       // (which the host can't see inside the subprocess) so the context meter is
@@ -114,6 +165,7 @@ export function createProtocolParser(): AgentParser {
         ...(typeof j.linesRemoved === "number"
           ? { linesRemoved: j.linesRemoved }
           : {}),
+        ...(typeof j.hash === "string" ? { hash: j.hash } : {}),
       };
 
       if (j.phase === "start") return [start];

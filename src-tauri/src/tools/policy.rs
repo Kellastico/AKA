@@ -42,6 +42,10 @@ pub enum Action<'a> {
     Read(&'a Path),
     Search(&'a Path),
     Write(&'a Path),
+    /// Remove a file — a mutation that is **approval-gated**: deny-by-default
+    /// unless the user explicitly approved it (like `git`, deletion is not a
+    /// free write).
+    Delete(&'a Path),
     Git,
     Network(&'a str),
     Exec(&'a str),
@@ -53,6 +57,7 @@ impl Action<'_> {
             Action::Read(_) => Capability::FsRead,
             Action::Search(_) => Capability::Search,
             Action::Write(_) => Capability::FsWrite,
+            Action::Delete(_) => Capability::FsWrite,
             Action::Git => Capability::Git,
             Action::Network(_) => Capability::Network,
             Action::Exec(_) => Capability::Exec,
@@ -81,6 +86,17 @@ pub fn check(action: &Action, sandbox: &Sandbox, limits: &Limits) -> Result<(), 
         Action::Read(p) | Action::Search(p) | Action::Write(p) => {
             assert_within_sandbox(p, sandbox).map_err(|_| PolicyError::OutOfScope {
                 path: p.display().to_string(),
+            })
+        }
+        // Delete: must be in scope AND explicitly approved. Scope is checked first
+        // (an out-of-project delete is `OutOfScope`, not merely unapproved); an
+        // in-scope delete is gated behind approval so an unapproved delete is denied.
+        Action::Delete(p) => {
+            assert_within_sandbox(p, sandbox).map_err(|_| PolicyError::OutOfScope {
+                path: p.display().to_string(),
+            })?;
+            Err(PolicyError::RequiresApproval {
+                folder: Capability::FsWrite.as_str().to_string(),
             })
         }
         // Approval-gated. `git_requires_approval` may turn the gate off (a
@@ -318,6 +334,32 @@ mod tests {
         };
         assert!(check(&Action::Exec("pytest"), &sb, &limits2).is_ok());
         assert!(check(&Action::Exec("rm"), &sb, &limits2).is_err());
+    }
+
+    #[test]
+    fn delete_is_scope_checked_then_approval_gated() {
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        let root = tmp.join("aka-policy-delete");
+        std::fs::create_dir_all(&root).unwrap();
+        let sb = sandbox_at(&root);
+        let limits = Limits::default();
+
+        // An out-of-project delete is OutOfScope, not merely unapproved.
+        let outside = tmp.join("victim.txt");
+        assert!(matches!(
+            check(&Action::Delete(&outside), &sb, &limits),
+            Err(PolicyError::OutOfScope { .. })
+        ));
+
+        // An in-scope delete is approval-gated → denied unless approved.
+        let inside = root.join("a.txt");
+        assert!(matches!(
+            check(&Action::Delete(&inside), &sb, &limits),
+            Err(PolicyError::RequiresApproval { .. })
+        ));
+        // Delete self-classifies into the fs_write folder.
+        assert_eq!(Action::Delete(&inside).folder(), Capability::FsWrite);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

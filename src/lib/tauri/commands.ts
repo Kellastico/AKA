@@ -313,6 +313,12 @@ export type CapabilitiesBlock = {
   phase_overrides?: Record<Phase, Capability[]> | null;
   /** Tool names where a foreign agent's own impl may win over the House built-in. */
   tool_overrides: string[];
+  /**
+   * Whether AKA runs the `--äkä-probe` capability handshake before a session's
+   * first run. On (default) → probe-answering agents auto-enable the rich
+   * treatment; off → every agent is treated as a plain agent. Purely additive.
+   */
+  probe: boolean;
 };
 
 export type ProjectConfig = {
@@ -366,6 +372,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     git_requires_approval: true,
     phase_overrides: null,
     tool_overrides: [],
+    probe: true,
   },
   task_template: null,
 };
@@ -406,6 +413,22 @@ export type DetectedAgent = {
 };
 
 /**
+ * The capability dial emitted to a spawned agent as `AGENT_*` env. Derived from
+ * the model classification + chosen posture in `model-posture.ts`; the host only
+ * relays it. A posture-aware agent honors it; others ignore the unknown env.
+ */
+export type AgentPosture = {
+  /** Size tier `small | mid | large` → `AGENT_PROFILE`. */
+  profile: string;
+  /** `native | text` → `AGENT_TOOLCALL` (native only when the model supports it). */
+  toolcall: string;
+  /** `loose | strict` → `AGENT_GATING`. */
+  gating: string;
+  /** Max autonomous steps before orchestrator intervention → `AGENT_LEASH`. */
+  leash: number;
+};
+
+/**
  * Launch the agent configured for `projectPath`. The backend reads the
  * project's config on every call, so changes to the agent block take effect
  * on the next run with no restart.
@@ -441,6 +464,13 @@ export async function runAgent(
    * (a JSON array of `{ name, kind, path }`). Omit when there are none.
    */
   attachments?: { name: string; kind: string; path?: string }[],
+  /**
+   * The capability dial for this run, emitted to the agent as `AGENT_PROFILE`/
+   * `AGENT_TOOLCALL`/`AGENT_GATING`/`AGENT_LEASH`. Omit for the None posture or
+   * when the dial is disabled — the backend then emits no `AGENT_*` env, and an
+   * agent that doesn't honor the dial ignores it regardless (no regression).
+   */
+  posture?: AgentPosture,
 ): Promise<void> {
   return invoke("run_agent", {
     task,
@@ -451,6 +481,7 @@ export async function runAgent(
     apiKeyOverride: apiKeyOverride ?? null,
     imagePaths: imagePaths ?? null,
     attachments: attachments ?? null,
+    posture: posture ?? null,
   });
 }
 
@@ -516,6 +547,65 @@ export async function detectAgents(bins: string[]): Promise<DetectedAgent[]> {
 export async function recheckAgents(bins: string[]): Promise<DetectedAgent[]> {
   if (!hasTauri()) return [];
   return invoke<DetectedAgent[]>("recheck_agents", { bins });
+}
+
+// ---------- Capability probe (`--äkä-probe`) ----------
+
+/**
+ * The capability object a probe-answering agent (Änyä/Enyö) prints in response to
+ * `--äkä-probe`. Field names are the agent's verbatim wire format (snake_case plus
+ * the kebab `capability-contract`), so this mirrors exactly what the agent sent.
+ */
+export type AgentProbe = {
+  /** Always `"agent"` for a valid answer. */
+  type: string;
+  name: string;
+  /** Agent owns its own LLM connection → AKA locks the model picker. */
+  manages_llm: boolean;
+  /** Agent emits a typed node/phase stream → AKA enables the stream panel. */
+  supports_streaming: boolean;
+  supports_dry_run: boolean;
+  required_args: string[];
+  /** `"v1"` → host-driven phase routing + folder-keyed shadow/fallback. */
+  "capability-contract"?: string | null;
+  /** Advertised capability folders, retained verbatim (never trusted for policy). */
+  capability_folders: string[];
+};
+
+/** Negotiated contract mode — the wire form of the Rust `ContractMode`. */
+export type ContractMode = "v1" | "mcp-baseline";
+
+/**
+ * Result of probing the project's configured agent once per session. `answered`
+ * separates a rich (probe-answering) agent from a plain one; `contract` is always
+ * present (the safe `mcp-baseline` when the agent didn't answer or isn't v1).
+ */
+export type ProbeResult = {
+  answered: boolean;
+  contract: ContractMode;
+  capabilities?: AgentProbe;
+};
+
+/** The silent-degrade result used outside Tauri and as the universal safe default. */
+export const PLAIN_PROBE: ProbeResult = { answered: false, contract: "mcp-baseline" };
+
+/**
+ * Run `<agent_bin> --äkä-probe` for the project and return its advertised
+ * capabilities. Never throws on a non-answer (timeout / non-JSON / non-zero exit)
+ * — those resolve to {@link PLAIN_PROBE}, so a foreign agent degrades silently.
+ * Caches belong to the caller: probe once per session, never per task.
+ */
+export async function probeAgentCapabilities(
+  projectPath: string,
+): Promise<ProbeResult> {
+  if (!hasTauri()) return PLAIN_PROBE;
+  try {
+    return await invoke<ProbeResult>("probe_agent_capabilities", { projectPath });
+  } catch {
+    // Misconfiguration (no sandbox yet, etc.) must never break a run — treat it
+    // as a plain agent, exactly like a non-answer.
+    return PLAIN_PROBE;
+  }
 }
 
 // ---------- Checkpoints ----------
@@ -1023,6 +1113,85 @@ export async function callLlm(
     messages,
     projectPath,
     model: model ?? null,
+  });
+}
+
+// ---------- Built-in "None" agent: native tool-calling loop ----------
+
+/** An OpenAI `tools` entry advertised to the model (built host-side). */
+export type ToolDef = {
+  type: string;
+  function: { name: string; description: string; parameters: unknown };
+};
+
+/** A tool call the model emitted. `arguments` is a raw JSON string. */
+export type ToolCall = {
+  id: string;
+  type?: string | null;
+  function: { name: string; arguments: string };
+};
+
+/** One assistant turn in the loop — a final answer, tool calls, or both. */
+export type AssistantTurn = {
+  content: string | null;
+  toolCalls: ToolCall[];
+  reasoning: string | null;
+};
+
+/** The result of executing one tool call, fed back to the model. */
+export type ToolResult = { ok: boolean; content: string };
+
+/** The phase the built-in loop runs at — read-only, +write, +exec. */
+export type ToolPhase = "readonly" | "write" | "exec";
+
+/**
+ * The model-facing tool manifest for the built-in loop at `phase`. The model can
+ * only ever be offered tools that are unlocked at that phase.
+ */
+export async function builtinToolDefs(phase: ToolPhase): Promise<ToolDef[]> {
+  if (!hasTauri()) return [];
+  return invoke<ToolDef[]>("builtin_tool_defs", { phase });
+}
+
+/**
+ * Run one non-streamed native tool-calling turn: the model either calls a tool
+ * (returned in `toolCalls`) or gives a final answer (`content`). Cloud egress is
+ * gated like every other LLM call.
+ */
+export async function callLlmTools(
+  messages: unknown[],
+  tools: ToolDef[],
+  projectPath: string,
+  model?: string | null,
+): Promise<AssistantTurn> {
+  if (!hasTauri()) {
+    return { content: "[Browser preview — no Tauri runtime]", toolCalls: [], reasoning: null };
+  }
+  return invoke<AssistantTurn>("call_llm_tools", {
+    messages,
+    tools,
+    projectPath,
+    model: model ?? null,
+  });
+}
+
+/**
+ * Execute one model-chosen tool call through the single policy-enforced
+ * chokepoint. Resolves to `{ ok:false }` (not a throw) for a denied/malformed
+ * call so the loop can recover. `phase` gates which tools may run.
+ */
+export async function executeBuiltinTool(
+  name: string,
+  argumentsJson: string,
+  projectPath: string,
+  phase: ToolPhase,
+): Promise<ToolResult> {
+  if (!hasTauri()) return { ok: false, content: "No Tauri runtime." };
+  return invoke<ToolResult>("execute_builtin_tool", {
+    name,
+    arguments: argumentsJson,
+    projectPath,
+    phase,
   });
 }
 

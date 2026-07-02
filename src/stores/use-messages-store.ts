@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { load } from "@tauri-apps/plugin-store";
-import type { AppError } from "../lib/tauri/commands";
+import type { AppError, ProbeResult } from "../lib/tauri/commands";
+import type { Posture } from "../lib/model-posture";
 import { backfillSession } from "../lib/agent-parsers/cleanup";
 
 export type MessageRole = "user" | "assistant" | "tool" | "reasoning";
@@ -107,6 +108,22 @@ export type Message = {
 export type SessionMeta = {
   agentId?: string;
   modelId?: string;
+  /**
+   * Cached `--äkä-probe` result for this session. Probed once on the session's
+   * first agent run (never per task), invalidated when the agent changes. Drives
+   * the capability-driven UI — model lock, stream panel, phase routing — purely
+   * from what the agent advertised, with no agent-name branching. Absent until
+   * probed; a non-answering agent caches a plain (`answered:false`) result so we
+   * don't re-probe it every run.
+   */
+  probe?: ProbeResult;
+  /**
+   * Explicit posture override for this session (the thin↔thick dial). Absent =
+   * follow the selected model's recommended posture. Set only by an explicit
+   * user choice in the picker, or auto-selected on model change when the
+   * `autoApplyPosture` opt-in is on — never written silently otherwise.
+   */
+  posture?: Posture;
 };
 
 type MessagesState = {
@@ -609,3 +626,26 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     schedulePersist();
   },
 }));
+
+/**
+ * The cached `--äkä-probe` result for the active session, or `undefined` until it
+ * has been probed. The single source for the capability-driven UI (model lock,
+ * stream panel, phase routing) — read it, branch on the advertised capabilities,
+ * never on the agent's name.
+ */
+export function useActiveSessionProbe(): ProbeResult | undefined {
+  return useMessagesStore((s) =>
+    s.currentSessionId ? s.sessionMeta[s.currentSessionId]?.probe : undefined,
+  );
+}
+
+/**
+ * The active session's explicit posture override, or `undefined` to follow the
+ * model's recommendation. The picker reads this to mark the active posture and
+ * the run path reads it (via `sessionMeta`) to compute the emitted dial.
+ */
+export function useActiveSessionPosture(): Posture | undefined {
+  return useMessagesStore((s) =>
+    s.currentSessionId ? s.sessionMeta[s.currentSessionId]?.posture : undefined,
+  );
+}

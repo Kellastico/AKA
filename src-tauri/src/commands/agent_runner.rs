@@ -69,6 +69,40 @@ pub struct AttachmentMeta {
     pub path: Option<String>,
 }
 
+/// The capability dial for a spawned agent — the **host emits it; a posture-aware
+/// agent honors it**. Agents that don't recognize it ignore the unknown env, so
+/// emitting it is a safe no-op (Task 3 backward-compat guarantee). The values are
+/// derived frontend-side from the model classification + chosen posture, so the
+/// heuristic lives in exactly one place (`model-posture.ts`); the host only relays
+/// them. See `docs/AKA-Architecture.md` for the contract.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPosture {
+    /// Size tier `small | mid | large` → `AGENT_PROFILE`.
+    pub profile: String,
+    /// `native | text` → `AGENT_TOOLCALL` (native only when the model supports it).
+    pub toolcall: String,
+    /// `loose | strict` → `AGENT_GATING`.
+    pub gating: String,
+    /// Max autonomous steps before orchestrator intervention → `AGENT_LEASH`.
+    pub leash: u32,
+}
+
+/// The env pairs a posture maps to. Pure + total so it's unit-testable without
+/// spawning anything. Empty when `posture` is absent (feature off, None posture,
+/// or a legacy caller) — emitting nothing keeps those runs byte-for-byte unchanged.
+fn posture_env(posture: Option<&AgentPosture>) -> Vec<(&'static str, String)> {
+    match posture {
+        Some(p) => vec![
+            ("AGENT_PROFILE", p.profile.clone()),
+            ("AGENT_TOOLCALL", p.toolcall.clone()),
+            ("AGENT_GATING", p.gating.clone()),
+            ("AGENT_LEASH", p.leash.to_string()),
+        ],
+        None => Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LinePayload {
@@ -109,6 +143,23 @@ const EVT_DONE: &str = "agent://done";
 const EVT_QUESTION: &str = "agent://question";
 /// Lifecycle transitions the UI reflects (running ↔ paused).
 const EVT_STATE: &str = "agent://state";
+
+/// Emit a **host-authored** `@@aka` card line into a run's output stream, so it
+/// flows through the same `agent://output` → protocol-parser → timeline pipeline
+/// as agent-authored cards. This is how host-side execution enforcement (denials,
+/// witnesses) surfaces as a visible card without a new card system — the host
+/// speaks the same `@@aka` protocol the frontend already renders. `marker_line`
+/// must be a complete `@@aka {…}` line (see `tools::execution_witness`).
+pub fn emit_aka_card(app: &AppHandle, run_id: &str, marker_line: String) {
+    let _ = app.emit(
+        EVT_OUTPUT,
+        LinePayload {
+            run_id: run_id.to_string(),
+            line: marker_line,
+            stream: "stdout",
+        },
+    );
+}
 
 #[cfg(unix)]
 const SIG_STOP: i32 = libc::SIGSTOP;
@@ -351,6 +402,10 @@ pub async fn run_agent(
     // All attachments for this task ({ name, kind, path }), so an agent that
     // wants richer context than the image paths alone can find them.
     attachments: Option<Vec<AttachmentMeta>>,
+    // The capability dial for this run (profile/toolcall/gating/leash), derived
+    // from the model classification + chosen posture. `None` for the None posture
+    // (no subprocess) or when the dial is disabled — emits no AGENT_* env.
+    posture: Option<AgentPosture>,
 ) -> Result<(), AppError> {
     if project_path.trim().is_empty() {
         return Err(AppError::sandbox(project_path.clone()));
@@ -458,6 +513,15 @@ pub async fn run_agent(
         "OPENAI_API_KEY".into(),
         if api_key.is_empty() { "nokey".into() } else { api_key.clone() },
     );
+
+    // Capability dial (Task 3): the posture's profile/toolcall/gating/leash as
+    // `AGENT_*` env, alongside the existing AKA contract. A posture-aware agent
+    // (Änyä/Enyö) reads these to pick its tool-calling mode, gate tightness, and
+    // autonomy budget; any other agent ignores the unknown env. Absent posture
+    // (None / disabled / legacy) inserts nothing.
+    for (k, v) in posture_env(posture.as_ref()) {
+        env.insert(k.into(), v);
+    }
 
     // Put the `aka-tool` shim on the agent's PATH so any agent that can run a
     // shell command can reach AKA's built-in tools. Prepended for discoverability;
@@ -873,7 +937,34 @@ pub async fn recheck_agents(bins: Vec<String>) -> Vec<DetectedAgent> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_prompt, strip_ansi};
+    use super::{classify_prompt, posture_env, strip_ansi, AgentPosture};
+
+    #[test]
+    fn posture_env_is_empty_when_absent() {
+        // None posture / disabled / legacy caller → no AGENT_* env, so the run is
+        // byte-for-byte unchanged.
+        assert!(posture_env(None).is_empty());
+    }
+
+    #[test]
+    fn posture_env_emits_the_full_dial() {
+        let p = AgentPosture {
+            profile: "large".into(),
+            toolcall: "native".into(),
+            gating: "loose".into(),
+            leash: 24,
+        };
+        let env = posture_env(Some(&p));
+        assert_eq!(
+            env,
+            vec![
+                ("AGENT_PROFILE", "large".to_string()),
+                ("AGENT_TOOLCALL", "native".to_string()),
+                ("AGENT_GATING", "loose".to_string()),
+                ("AGENT_LEASH", "24".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn detects_yes_no_confirmations() {

@@ -1,5 +1,36 @@
 import { ReactNode, Ref } from "react";
-import { CaretDown, Check, Lock } from "@phosphor-icons/react";
+import { CaretDown, Check, Lock, MagnifyingGlass } from "@phosphor-icons/react";
+
+/**
+ * Sticky type-to-filter box for long picker lists (models / agents). Only the
+ * rounded input field itself is opaque (~95%) with a background blur, so rows
+ * that scroll behind the field are blurred out while the surrounding area stays
+ * transparent. Autofocuses so the user can type at once.
+ */
+export function PickerSearchInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (q: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <div className="sticky top-0 z-20 pb-2">
+      <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-[#0e0820]/95 px-2.5 py-1.5 backdrop-blur-md">
+        <MagnifyingGlass size={13} className="shrink-0 text-white/45" />
+        <input
+          autoFocus
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="w-full bg-transparent text-xs text-white outline-none placeholder:text-white/30"
+        />
+      </div>
+    </div>
+  );
+}
 
 export function PickerPillButton({
   buttonRef,

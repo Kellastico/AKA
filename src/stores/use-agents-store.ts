@@ -178,7 +178,10 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     // current selection on creation — "last-used sticks".
     const { currentSessionId, setSessionMeta } = useMessagesStore.getState();
     if (currentSessionId) {
-      setSessionMeta(currentSessionId, { agentId: id });
+      // Clear any cached `--äkä-probe` result — the new agent advertises its own
+      // capabilities, so the session re-probes on its next run rather than
+      // inheriting the previous agent's lock/stream/contract.
+      setSessionMeta(currentSessionId, { agentId: id, probe: undefined });
     }
     // Also mirror into the project config so it survives restarts AND acts
     // as the default for fresh projects that have no session meta yet.

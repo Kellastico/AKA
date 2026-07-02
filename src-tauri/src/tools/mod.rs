@@ -5,6 +5,7 @@
 
 pub mod capability;
 pub mod catalog;
+pub mod execution_witness;
 pub mod mcp;
 pub mod phase;
 pub mod policy;
@@ -19,7 +20,9 @@ use serde::Serialize;
 /// always wins — AKA fills only the names left open. `declared` is the agent's
 /// per-agent "tools it already provides" list (case-insensitive).
 pub fn effective_tools(declared: &[String]) -> Vec<ToolSpec> {
-    catalog::builtin_tools()
+    // The agent manifest draws from the shim projection — agents can only run
+    // tools the `aka-tool` CLI implements, never the native-loop-only ones.
+    catalog::shim_tools()
         .into_iter()
         .filter(|t| !declared.iter().any(|d| d.eq_ignore_ascii_case(t.name)))
         .collect()
@@ -28,7 +31,7 @@ pub fn effective_tools(declared: &[String]) -> Vec<ToolSpec> {
 /// Names of built-ins shadowed by the agent's declared tools — surfaced in the
 /// UI ("N defaults overridden") so a swapped-in tool isn't a silent change.
 pub fn shadowed_tools(declared: &[String]) -> Vec<&'static str> {
-    catalog::builtin_tools()
+    catalog::shim_tools()
         .into_iter()
         .filter(|t| declared.iter().any(|d| d.eq_ignore_ascii_case(t.name)))
         .map(|t| t.name)
@@ -82,7 +85,7 @@ pub fn build_manifest(declared: &[String], mode: &str, enabled: bool) -> ToolMan
     } else if mode.eq_ignore_ascii_case("gapfill") {
         effective_tools(declared)
     } else {
-        catalog::builtin_tools()
+        catalog::shim_tools()
     };
     ToolManifest {
         tools,
@@ -192,7 +195,9 @@ mod tests {
 
     #[test]
     fn no_declarations_offers_everything() {
-        assert_eq!(effective_tools(&[]).len(), catalog::builtin_tools().len());
+        // The agent manifest offers every *shim* tool (not the native-loop-only
+        // ones), since those are all an agent can actually run via the CLI.
+        assert_eq!(effective_tools(&[]).len(), catalog::shim_tools().len());
         assert!(shadowed_tools(&[]).is_empty());
     }
 

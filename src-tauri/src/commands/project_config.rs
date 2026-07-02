@@ -166,6 +166,12 @@ pub struct CapabilitiesBlock {
     /// always wins.
     #[serde(default)]
     pub tool_overrides: Vec<String>,
+    /// Whether AKA runs the `--äkä-probe` capability handshake before a session's
+    /// first run. On (default) → probe-answering agents auto-enable the rich
+    /// treatment; off → every agent is treated as a plain agent. Purely additive:
+    /// disabling never changes house safety, only the UI/routing affordances.
+    #[serde(default = "default_true")]
+    pub probe: bool,
 }
 
 impl Default for CapabilitiesBlock {
@@ -176,6 +182,7 @@ impl Default for CapabilitiesBlock {
             git_requires_approval: true,
             phase_overrides: None,
             tool_overrides: Vec::new(),
+            probe: true,
         }
     }
 }

@@ -65,23 +65,110 @@ pub struct ToolSpec {
     /// self-classify by *effect*, not mechanism (see `diagnostics` below).
     pub folder: Capability,
     pub kind: ToolKind,
+    /// Exposed to **external agents** via the `aka-tool` CLI shim (advertised in
+    /// `AKA_TOOLS`/`TOOLS.md`, runnable as `aka-tool <name>`). Only set when the
+    /// shim binary actually implements the subcommand, so we never advertise a
+    /// tool an agent can't run.
+    pub shim: bool,
+    /// Exposed to the **built-in native-tool-calling loop** (the model AKA drives)
+    /// via `builtin_tool_defs`, executed through the host's enforced path. This is
+    /// the model-facing surface; both surfaces draw from this one catalog.
+    pub native: bool,
 }
 
-/// The full pantry AKA ships. The agent's own tools shadow these by name (see
-/// `super::effective_tools`). The PDF tools join here in the final phase.
+/// The full pantry AKA ships — the **single source of truth** for every built-in
+/// tool. Each entry declares its privilege `folder` plus which surface(s) expose
+/// it: `shim` (external agents, via the `aka-tool` CLI) and/or `native` (the
+/// built-in loop, via `builtin_tool_defs`). Both surfaces project from this one
+/// list; the agent's own tools shadow these by name (see `super::effective_tools`).
+///
+/// The `fs_write` tools (`str_replace`/`apply_diff`/`delete_file`) map to AKA's
+/// enforced edit commands (`sandbox::apply_str_replace`/`apply_diff`/`delete_file`),
+/// so the scope + checkpoint + approval + witness rules are baked into execution
+/// wherever AKA runs the tool — the model can only reach them through that path.
 pub fn builtin_tools() -> Vec<ToolSpec> {
-    vec![ToolSpec {
-        name: "diagnostics",
-        usage: "aka-tool diagnostics — run the project's configured typecheck/lint and \
-                return structured {file,line,severity,message}",
-        category: "diagnostics",
-        model_desc: "Run the project's typecheck/lint and return structured findings.",
-        // `Search`, not `Exec`: a House tool self-classifies by *effect*. Diagnostics
-        // shells out to a configured linter, but the effect is read-only and scoped,
-        // so it lives in `search` and stays usable in RESEARCH/REVIEW without forcing
-        // the deny-by-default `exec` opt-in. The exec-of-a-trusted-command is the
-        // House's own mechanism, not agent-driven execution.
-        folder: Capability::Search,
-        kind: ToolKind::Passthrough,
-    }]
+    vec![
+        ToolSpec {
+            name: "diagnostics",
+            usage: "aka-tool diagnostics — run the project's configured typecheck/lint and \
+                    return structured {file,line,severity,message}",
+            category: "diagnostics",
+            model_desc: "Run the project's typecheck/lint and return structured findings.",
+            // `Search`, not `Exec`: a House tool self-classifies by *effect*. Diagnostics
+            // shells out to a configured linter, but the effect is read-only and scoped,
+            // so it lives in `search` and stays usable in RESEARCH/REVIEW without forcing
+            // the deny-by-default `exec` opt-in.
+            folder: Capability::Search,
+            kind: ToolKind::Passthrough,
+            shim: true,
+            native: false,
+        },
+        ToolSpec {
+            name: "read_file",
+            usage: "read_file {path} — read a UTF-8 text file within the project",
+            category: "fs",
+            model_desc: "Read a text file within the project.",
+            folder: Capability::FsRead,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+        ToolSpec {
+            name: "list_dir",
+            usage: "list_dir {path?} — list a directory within the project",
+            category: "fs",
+            model_desc: "List the entries of a directory within the project.",
+            folder: Capability::Search,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+        ToolSpec {
+            name: "search_files",
+            usage: "search_files {query, path?} — substring search over project files",
+            category: "search",
+            model_desc: "Search project files for a substring; returns path:line matches.",
+            folder: Capability::Search,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+        ToolSpec {
+            name: "str_replace",
+            usage: "str_replace {path, old_str, new_str} — anchored single-occurrence edit",
+            category: "fs",
+            model_desc: "Replace one exact snippet in a file (anchored edit).",
+            folder: Capability::FsWrite,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+        ToolSpec {
+            name: "apply_diff",
+            usage: "apply_diff {patch} — apply a unified diff to project files",
+            category: "fs",
+            model_desc: "Apply a unified diff to files within the project.",
+            folder: Capability::FsWrite,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+        ToolSpec {
+            name: "delete_file",
+            usage: "delete_file {path} — delete a file (approval-gated)",
+            category: "fs",
+            model_desc: "Delete a file within the project (requires approval).",
+            folder: Capability::FsWrite,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
+    ]
+}
+
+/// Tools exposed to **external agents** via the `aka-tool` shim (the agent-facing
+/// projection of the catalog). Filtered by the `shim` flag so agents are only ever
+/// advertised subcommands the shim actually implements.
+pub fn shim_tools() -> Vec<ToolSpec> {
+    builtin_tools().into_iter().filter(|t| t.shim).collect()
 }

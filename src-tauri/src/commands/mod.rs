@@ -1,10 +1,12 @@
 pub mod agent_runner;
+pub mod builtin_tools;
 pub mod checkpoints;
 pub mod dev_server;
 pub mod diff;
 pub mod files;
 pub mod llm;
 pub mod models;
+pub mod probe;
 pub mod project_config;
 pub mod shell;
 pub mod shell_run;

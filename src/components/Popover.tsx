@@ -159,17 +159,26 @@ export function Popover({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    // Clicking INTO the Preview <iframe> (or switching apps) steals focus
-    // without ever firing a mousedown in the parent document — so the outside-
-    // click handler alone would leave the popover stuck open. Window blur
-    // catches that case so "click outside to close" works over the iframe too.
+    // Clicking INTO the Preview <iframe> steals focus without ever firing a
+    // mousedown in the parent document, so the outside-click handler alone would
+    // leave the popover stuck open over the iframe. Window blur catches that —
+    // BUT a blur also fires when the user merely switches apps (e.g. to copy an
+    // API key from a password manager), and closing then is wrong: the modal
+    // would vanish mid-edit. So only treat blur as an outside-click when focus
+    // actually moved to an in-app <iframe>; a real app switch leaves
+    // activeElement on the body/input and is ignored.
+    const onBlur = () => {
+      window.setTimeout(() => {
+        if (document.activeElement?.tagName === "IFRAME") onClose();
+      }, 0);
+    };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
-    window.addEventListener("blur", onClose);
+    window.addEventListener("blur", onBlur);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
-      window.removeEventListener("blur", onClose);
+      window.removeEventListener("blur", onBlur);
     };
   }, [open, onClose, anchorRef]);
 

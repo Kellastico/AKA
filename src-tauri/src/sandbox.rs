@@ -422,7 +422,21 @@ pub async fn apply_str_replace(
     } else {
         project_root.join(&req.path)
     };
-    assert_within_sandbox(&target, &sandbox).map_err(|_| AppError::edit_conflict(EditError::OutOfScope.reason()))?;
+    // Pre-tool gate (mirrors gate_egress): an out-of-folder write is denied AND
+    // surfaced as a visible @@aka card — never a silent failure.
+    if assert_within_sandbox(&target, &sandbox).is_err() {
+        let reason = EditError::OutOfScope.reason();
+        crate::commands::agent_runner::emit_aka_card(
+            &app,
+            &run_id,
+            crate::tools::execution_witness::denial_card_line(
+                "write",
+                "apply_str_replace",
+                &format!("{reason}: {}", req.path),
+            ),
+        );
+        return Err(AppError::edit_conflict(reason));
+    }
 
     let content = tokio::fs::read_to_string(&target)
         .await
@@ -451,6 +465,25 @@ pub async fn apply_str_replace(
         .await
         .map_err(|e| AppError::edit_conflict(format!("write failed: {e}")))?;
 
+    // Post-tool witness: record the REAL change (project-relative path + content
+    // hash + line range) as a visible @@aka write card. This is the host's own
+    // observation of what landed on disk, independent of any agent claim.
+    let rel = target
+        .strip_prefix(&project_root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| req.path.clone());
+    let witness = crate::tools::execution_witness::build_witness(
+        &rel,
+        &updated,
+        lines_added,
+        lines_removed,
+    );
+    crate::commands::agent_runner::emit_aka_card(
+        &app,
+        &run_id,
+        crate::tools::execution_witness::witness_card_line(&witness),
+    );
+
     let mtime_ms = tokio::fs::metadata(&target)
         .await
         .ok()
@@ -465,6 +498,109 @@ pub async fn apply_str_replace(
         lines_added,
         lines_removed,
     })
+}
+
+// ---------- delete_file (approval-gated deletion) ----------
+
+/// Delete a file — enforced from OUTSIDE the agent. The path must resolve inside
+/// the sandbox AND the delete must be explicitly approved (deny-by-default via
+/// `policy::check(Action::Delete)`). An out-of-folder or unapproved delete is
+/// denied and surfaced as a visible `@@aka` card; nothing is removed. Approved
+/// deletes snapshot the tree first (undoable) and emit a witness card.
+#[tauri::command]
+pub async fn delete_file(
+    app: AppHandle,
+    state: State<'_, SandboxState>,
+    checkpoints: State<'_, crate::commands::checkpoints::CheckpointState>,
+    project_path: String,
+    run_id: String,
+    path: String,
+    approved: bool,
+) -> Result<(), AppError> {
+    use crate::tools::policy::{check, Action, PolicyError};
+
+    let sandbox = state
+        .require()
+        .await
+        .map_err(|_| AppError::sandbox(project_path.clone()))?;
+    let project_root = resolve_canonical(Path::new(&project_path))
+        .map_err(|_| AppError::sandbox(project_path.clone()))?;
+    let target = if Path::new(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        project_root.join(&path)
+    };
+    let limits = crate::commands::project_config::load_from_disk(&project_path)
+        .await
+        .map(|c| c.capabilities.limits())
+        .unwrap_or_default();
+
+    let deny = |reason: &str| {
+        crate::commands::agent_runner::emit_aka_card(
+            &app,
+            &run_id,
+            crate::tools::execution_witness::denial_card_line(
+                "write",
+                "delete_file",
+                &format!("{reason}: {path}"),
+            ),
+        );
+    };
+
+    match check(&Action::Delete(&target), &sandbox, &limits) {
+        Err(PolicyError::OutOfScope { .. }) => {
+            deny("delete outside the project");
+            return Err(AppError::sandbox(target.to_string_lossy().into_owned()));
+        }
+        // Delete is approval-gated: without approval it is denied.
+        Err(PolicyError::RequiresApproval { .. }) if !approved => {
+            deny("unapproved delete");
+            return Err(AppError::edit_conflict("delete not approved".to_string()));
+        }
+        Err(PolicyError::RequiresApproval { .. }) | Ok(()) => { /* approved → proceed */ }
+        Err(PolicyError::Denied { .. }) => {
+            deny("delete denied by policy");
+            return Err(AppError::edit_conflict("delete denied".to_string()));
+        }
+    }
+
+    // Snapshot before removal so the deletion is undoable (best-effort).
+    let file_label = target
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    let _ = crate::commands::checkpoints::create_checkpoint_inner(
+        &app,
+        checkpoints.inner(),
+        &project_path,
+        &run_id,
+        &format!("Before delete of {file_label}"),
+        "step",
+    )
+    .await;
+
+    // Count lines for the witness before the file is gone.
+    let removed_lines = tokio::fs::read_to_string(&target)
+        .await
+        .map(|c| c.lines().count() as u32)
+        .unwrap_or(0);
+    tokio::fs::remove_file(&target)
+        .await
+        .map_err(|e| AppError::edit_conflict(format!("delete failed: {e}")))?;
+
+    // Witness the deletion — after-content is empty; line range = lines removed.
+    let rel = target
+        .strip_prefix(&project_root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.clone());
+    let witness =
+        crate::tools::execution_witness::build_witness(&rel, "", 0, removed_lines);
+    crate::commands::agent_runner::emit_aka_card(
+        &app,
+        &run_id,
+        crate::tools::execution_witness::witness_card_line(&witness),
+    );
+    Ok(())
 }
 
 // ---------- Tests ----------

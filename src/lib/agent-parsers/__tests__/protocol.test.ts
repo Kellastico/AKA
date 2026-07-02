@@ -75,6 +75,78 @@ describe("createProtocolParser", () => {
     // No usable used_tokens → consumed silently, never a card.
     expect(p.feed('@@aka {"event":"context","context_window":32768}')).toEqual([]);
   });
+
+  it("parses a dev-server control marker as a control event", () => {
+    const p = createProtocolParser();
+    expect(
+      p.feed('@@aka {"control":"dev_server","action":"restart"}'),
+    ).toEqual([{ type: "control", target: "dev_server", action: "restart" }]);
+    // Missing action defaults to empty string, not undefined.
+    expect(p.feed('@@aka {"control":"dev_server"}')).toEqual([
+      { type: "control", target: "dev_server", action: "" },
+    ]);
+    // It is control-plane: never a tool row.
+    const ev = p.feed('@@aka {"control":"dev_server","action":"kill"}');
+    expect(ev.every((e) => e.type === "control")).toBe(true);
+  });
+
+  it("parses a host witness card, carrying the recorded hash + line range", () => {
+    // The exact shape `execution_witness::witness_card_line` emits after a real
+    // on-disk edit — renders as a write card with the recorded diff evidence.
+    const p = createProtocolParser();
+    const events = p.feed(
+      '@@aka {"tool":"write","name":"witness","path":"src/a.rs","linesAdded":1,"linesRemoved":1,"hash":"abc123","ok":true}',
+    );
+    expect(events).toEqual([
+      { type: "tool_start", name: "witness", kind: "write", path: "src/a.rs" },
+      {
+        type: "tool_end",
+        ok: true,
+        path: "src/a.rs",
+        linesAdded: 1,
+        linesRemoved: 1,
+        hash: "abc123",
+      },
+    ]);
+  });
+
+  it("parses a host denial card as a failed tool card with a reason", () => {
+    // What `denial_card_line` emits when a gate blocks a write/delete.
+    const p = createProtocolParser();
+    const events = p.feed(
+      '@@aka {"tool":"write","name":"delete_file","ok":false,"preview":"denied: unapproved delete: a.txt"}',
+    );
+    expect(events[0]).toMatchObject({ type: "tool_start", name: "delete_file", kind: "write" });
+    expect(events[1]).toMatchObject({
+      type: "tool_end",
+      ok: false,
+      preview: "denied: unapproved delete: a.txt",
+    });
+  });
+
+  it("surfaces an in-band capability announcement as a capabilities event", () => {
+    const p = createProtocolParser();
+    const events = p.feed(
+      '@@aka {"announce":"capability-contract","name":"Änyä","manages_llm":true,"supports_streaming":true,"capability-contract":"v1","capability_folders":["read","write"]}',
+    );
+    expect(events).toEqual([
+      {
+        type: "capabilities",
+        probe: {
+          type: "agent",
+          name: "Änyä",
+          manages_llm: true,
+          supports_streaming: true,
+          supports_dry_run: false,
+          required_args: [],
+          "capability-contract": "v1",
+          capability_folders: ["read", "write"],
+        },
+      },
+    ]);
+    // It is control-plane: never a tool row, never chat prose.
+    expect(events.every((e) => e.type === "capabilities")).toBe(true);
+  });
 });
 
 describe("composeParsers / parserForAgent", () => {

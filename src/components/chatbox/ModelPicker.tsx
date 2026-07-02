@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Cube, Stack } from "@phosphor-icons/react";
+
+/** Show the search box once a list grows past this, so short lists stay click-only. */
+const SEARCH_THRESHOLD = 10;
 import { Popover } from "../Popover";
 import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
 import { useModelBrowserStore } from "../../features/01-llm-provider/use-model-browser-store";
@@ -7,16 +10,23 @@ import { HealthDot } from "../../features/01-llm-provider/ConnectionPanel";
 import { useActiveSessionRunning } from "../../stores/use-chat-store";
 import { useSessionStore } from "../../stores/use-session-store";
 import { useAgentsStore } from "../../stores/use-agents-store";
-import { useMessagesStore } from "../../stores/use-messages-store";
+import {
+  useMessagesStore,
+  useActiveSessionProbe,
+} from "../../stores/use-messages-store";
 import {
   PickerGroupLabel,
   PickerOption,
   PickerPillButton,
+  PickerSearchInput,
 } from "./PickerPill";
 
 export function ModelPicker({ compact }: { compact?: boolean }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  // Filter query for the model list — only surfaced when the runtime serves a
+  // long list (see SEARCH_THRESHOLD), so short lists stay click-only.
+  const [query, setQuery] = useState("");
 
   // When the Model Browser opens (from "Manage models"), close this popover so
   // it doesn't linger behind the modal.
@@ -26,6 +36,11 @@ export function ModelPicker({ compact }: { compact?: boolean }) {
   useEffect(() => {
     if (modelBrowserOpen) setOpen(false);
   }, [modelBrowserOpen]);
+
+  // Reset the search each time the picker closes so it reopens clean.
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
 
   const active = useRuntimeStore((s) => s.active);
   const healthy = useRuntimeStore((s) => s.healthy);
@@ -38,19 +53,24 @@ export function ModelPicker({ compact }: { compact?: boolean }) {
   // tears down the request and creates inconsistent state.
   const running = useActiveSessionRunning();
   // Model is session-locked when the active agent owns its LLM connection
-  // (external processes like Aider commit to a model at spawn time).
+  // (external processes like Aider commit to a model at spawn time). Two signals,
+  // OR'd: the user's manual `llmOwnership` setting, and — taking precedence the
+  // moment it's known — the agent's own `--äkä-probe` answer (`manages_llm`).
+  // A probe-answering agent thus auto-locks the picker with no manual config and
+  // no agent-name branching; a non-answerer falls back to the manual signal.
   const sessionHasMessages = useMessagesStore((s) => s.messages.length > 0);
   const selectedAgent = useAgentsStore((s) =>
     s.agents.find((a) => a.id === s.selectedAgentId),
   );
+  const probe = useActiveSessionProbe();
+  const agentManagesLlm =
+    probe?.capabilities?.manages_llm ?? selectedAgent?.llmOwnership === "agent";
   // ...but never lock when there's no model selected. A runtime switch can null
   // the selection (the old model isn't served here); locking that empty state
   // would trap the user — checklist says "Select a model" while the picker is
   // disabled. With no model, always allow a pick.
   const modelSessionLocked =
-    sessionHasMessages &&
-    selectedAgent?.llmOwnership === "agent" &&
-    selectedId != null;
+    sessionHasMessages && agentManagesLlm && selectedId != null;
 
   // When a runtime switch strands the session with no valid model, the store
   // bumps this counter — pop the picker open so the next step is obvious.
@@ -136,7 +156,26 @@ export function ModelPicker({ compact }: { compact?: boolean }) {
               </div>
             ) : (
               <div className="flex flex-col gap-1">
-              {models.map((m) => (
+              {models.length > SEARCH_THRESHOLD && (
+                <PickerSearchInput
+                  value={query}
+                  onChange={setQuery}
+                  placeholder="Search models…"
+                />
+              )}
+              {(() => {
+                const q = query.trim().toLowerCase();
+                const filtered = q
+                  ? models.filter((m) => m.toLowerCase().includes(q))
+                  : models;
+                if (filtered.length === 0) {
+                  return (
+                    <div className="px-3 py-2 text-xs text-white/45">
+                      No models match “{query.trim()}”.
+                    </div>
+                  );
+                }
+                return filtered.map((m) => (
                 <PickerOption
                   key={m}
                   selected={m === selectedId}
@@ -179,7 +218,8 @@ export function ModelPicker({ compact }: { compact?: boolean }) {
                 >
                   {m}
                 </PickerOption>
-              ))}
+                ));
+              })()}
               </div>
             )}
 

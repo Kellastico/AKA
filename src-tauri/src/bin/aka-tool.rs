@@ -33,7 +33,9 @@ fn main() {
     let code = match sub {
         "diagnostics" => run_diagnostics(rest),
         "list" => {
-            print_json(&catalog::builtin_tools());
+            // Agents only see tools the shim actually implements — never the
+            // native-loop-only tools (read_file/str_replace/…) they can't run here.
+            print_json(&catalog::shim_tools());
             0
         }
         "" | "help" | "-h" | "--help" => {

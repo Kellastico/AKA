@@ -3,11 +3,13 @@ import {
   ArrowsClockwise,
   ArrowSquareOut,
   Cube,
+  PencilSimple,
   Play,
   Plus,
   Plugs,
   PlugsConnected,
   Stop,
+  Trash,
 } from "@phosphor-icons/react";
 import {
   BUILTIN_RUNTIME_NAME,
@@ -28,6 +30,11 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
   const startRuntime = useRuntimeStore((s) => s.startRuntime);
   const stopRuntime = useRuntimeStore((s) => s.stopRuntime);
   const saveManual = useRuntimeStore((s) => s.saveManual);
+  const savedRuntimes = useRuntimeStore((s) => s.savedRuntimes);
+  const deleteSavedRuntime = useRuntimeStore((s) => s.deleteSavedRuntime);
+  const editSavedRuntime = useRuntimeStore((s) => s.editSavedRuntime);
+  const activeHealthy = useRuntimeStore((s) => s.healthy);
+  const pushToast = useRuntimeStore((s) => s.pushToast);
 
   const builtinStatus = useRuntimeStore((s) => s.builtinStatus);
   const builtinPort = useRuntimeStore((s) => s.builtinPort);
@@ -44,12 +51,35 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
   const [saving, setSaving] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
+  // Inline editor for a saved (custom) runtime — base URL of the one being edited.
+  const [editingUrl, setEditingUrl] = useState<string | null>(null);
+  const [editUrl, setEditUrl] = useState("");
+  const [editKey, setEditKey] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
   // Show every known runtime, sorted running → installed-but-stopped → not
   // installed. Not-installed rows render as dimmed "Install" links (rather than
   // being hidden), so users can discover and grab the ones they don't have.
   const ranked = [...detected].sort((a, b) => runtimeSortRank(a) - runtimeSortRank(b));
   const anyHealthy = detected.some((d) => d.healthy);
   const showEmptyHelper = !detecting && detected.length > 0 && !anyHealthy;
+
+  const savedUrls = new Set(savedRuntimes.map((s) => s.baseUrl));
+  const builtinUrl = builtinPort != null ? builtinEndpoint(builtinPort) : null;
+  const detectedByUrl = new Map(detected.map((d) => [d.baseUrl, d] as const));
+  // Detected section = runtimes NOT yet in the saved list (discover / install
+  // more). Installed local ones get folded into "Saved runtimes" automatically.
+  const detectedUnsaved = ranked.filter((r) => !savedUrls.has(r.baseUrl));
+  // Saved section = the permanent list (the built-in is shown separately above).
+  const savedList = savedRuntimes.filter((s) => s.baseUrl !== builtinUrl);
+
+  const beginEdit = (baseUrl: string, apiKey: string | null) => {
+    setEditingUrl(baseUrl);
+    setEditUrl(baseUrl);
+    setEditKey(apiKey ?? "");
+    setEditError(null);
+  };
 
   return (
     <div className="flex flex-col gap-3 px-1 py-1 text-white">
@@ -65,6 +95,86 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
           void restartBuiltin();
         }}
       />
+
+      <div className="h-px bg-white/10" />
+
+      {/* Saved (permanent) runtimes first — these are the user's own, more
+          relevant than the "install these" detected list below. */}
+      {savedList.length > 0 ? (
+        <>
+          <div className="px-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-white/50">
+              Saved runtimes
+            </span>
+          </div>
+          <div className="flex flex-col gap-1">
+            {savedList.map((s) => {
+              const det = detectedByUrl.get(s.baseUrl);
+              const isActive = active?.baseUrl === s.baseUrl;
+              // Health: live from the local probe when detected, else the active
+              // runtime's known health, else unknown (neutral) for an idle remote.
+              const healthy = det ? det.healthy : isActive ? activeHealthy : undefined;
+              const isCustom = !det; // custom/remote endpoints are editable
+              return editingUrl === s.baseUrl ? (
+                <EndpointForm
+                  key={s.baseUrl}
+                  url={editUrl}
+                  setUrl={setEditUrl}
+                  apiKey={editKey}
+                  setApiKey={setEditKey}
+                  saving={editSaving}
+                  error={editError}
+                  saveLabel="Update"
+                  onCancel={() => setEditingUrl(null)}
+                  onSave={async () => {
+                    setEditSaving(true);
+                    setEditError(null);
+                    const res = await editSavedRuntime(s.baseUrl, editUrl, editKey || null);
+                    setEditSaving(false);
+                    if (!res.ok) {
+                      setEditError(res.error ?? "Failed to validate endpoint");
+                      return;
+                    }
+                    setEditingUrl(null);
+                  }}
+                />
+              ) : (
+                <SavedRuntimeRow
+                  key={s.baseUrl}
+                  name={s.name}
+                  baseUrl={s.baseUrl}
+                  healthy={healthy}
+                  active={isActive}
+                  managed={det?.managed ?? false}
+                  launchable={det?.launchable ?? false}
+                  installed={det?.installed ?? false}
+                  editable={isCustom}
+                  onSelect={async () => {
+                    if (det) {
+                      await selectDetected(det);
+                      onDone?.();
+                      return;
+                    }
+                    const res = await saveManual(s.baseUrl, s.apiKey);
+                    if (!res.ok) {
+                      pushToast({
+                        kind: "error",
+                        text: res.error ?? "Couldn't connect to this runtime.",
+                      });
+                      return;
+                    }
+                    onDone?.();
+                  }}
+                  onStart={det ? () => startRuntime(det.name) : undefined}
+                  onStop={det ? () => stopRuntime(det.name) : undefined}
+                  onEdit={isCustom ? () => beginEdit(s.baseUrl, s.apiKey) : undefined}
+                  onDelete={() => void deleteSavedRuntime(s.baseUrl)}
+                />
+              );
+            })}
+          </div>
+        </>
+      ) : null}
 
       <div className="h-px bg-white/10" />
 
@@ -87,22 +197,28 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
         <div className="px-2 text-xs text-white/50">Probing local ports…</div>
       ) : null}
 
-      <div className="flex flex-col gap-1">
-        {ranked.map((r) => (
-          <RuntimeRow
-            key={r.baseUrl}
-            runtime={r}
-            active={active?.baseUrl === r.baseUrl}
-            onSelect={async () => {
-              await selectDetected(r);
-              onDone?.();
-            }}
-            onStart={() => startRuntime(r.name)}
-            onStop={() => stopRuntime(r.name)}
-            installUrl={RUNTIME_INSTALL_URLS[r.name]}
-          />
-        ))}
-      </div>
+      {detectedUnsaved.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          {detectedUnsaved.map((r) => (
+            <RuntimeRow
+              key={r.baseUrl}
+              runtime={r}
+              active={active?.baseUrl === r.baseUrl}
+              onSelect={async () => {
+                await selectDetected(r);
+                onDone?.();
+              }}
+              onStart={() => startRuntime(r.name)}
+              onStop={() => stopRuntime(r.name)}
+              installUrl={RUNTIME_INSTALL_URLS[r.name]}
+            />
+          ))}
+        </div>
+      ) : !detecting ? (
+        <div className="px-2 text-[11px] text-white/40">
+          All detected runtimes are saved above.
+        </div>
+      ) : null}
 
       {showEmptyHelper ? (
         <div className="mx-1 rounded-xl border border-white/10 bg-white/5 p-3 text-xs leading-relaxed text-white/70">
@@ -133,61 +249,33 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
           Add custom endpoint
         </button>
       ) : (
-        <div className="flex flex-col gap-2 px-1">
-          <label className="text-[11px] uppercase tracking-wide text-white/50">
-            Base URL
-          </label>
-          <input
-            value={manualUrl}
-            onChange={(e) => setManualUrl(e.target.value)}
-            placeholder="http://localhost:1234/v1"
-            className="w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-white outline-none placeholder:text-white/30 focus:border-white/40"
-          />
-          <label className="text-[11px] uppercase tracking-wide text-white/50">
-            API key (optional)
-          </label>
-          <input
-            value={manualKey}
-            onChange={(e) => setManualKey(e.target.value)}
-            type="password"
-            placeholder="sk-…"
-            className="w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-white outline-none placeholder:text-white/30 focus:border-white/40"
-          />
-          {manualError ? (
-            <div className="text-[11px] text-red-300">{manualError}</div>
-          ) : null}
-          <div className="flex justify-end gap-2 pt-1">
-            <button
-              onClick={() => {
-                setShowManual(false);
-                setManualError(null);
-              }}
-              className="rounded-lg px-2 py-1 text-xs text-white/60 hover:bg-white/10"
-            >
-              Cancel
-            </button>
-            <button
-              disabled={saving || !manualUrl.trim()}
-              onClick={async () => {
-                setSaving(true);
-                setManualError(null);
-                const result = await saveManual(manualUrl, manualKey || null);
-                setSaving(false);
-                if (!result.ok) {
-                  setManualError(result.error ?? "Failed to validate endpoint");
-                  return;
-                }
-                setShowManual(false);
-                setManualUrl("");
-                setManualKey("");
-                onDone?.();
-              }}
-              className="rounded-lg bg-white/15 px-3 py-1 text-xs text-white hover:bg-white/25 disabled:opacity-50"
-            >
-              {saving ? "Validating…" : "Save"}
-            </button>
-          </div>
-        </div>
+        <EndpointForm
+          url={manualUrl}
+          setUrl={setManualUrl}
+          apiKey={manualKey}
+          setApiKey={setManualKey}
+          saving={saving}
+          error={manualError}
+          saveLabel="Save"
+          onCancel={() => {
+            setShowManual(false);
+            setManualError(null);
+          }}
+          onSave={async () => {
+            setSaving(true);
+            setManualError(null);
+            const result = await saveManual(manualUrl, manualKey || null);
+            setSaving(false);
+            if (!result.ok) {
+              setManualError(result.error ?? "Failed to validate endpoint");
+              return;
+            }
+            setShowManual(false);
+            setManualUrl("");
+            setManualKey("");
+            onDone?.();
+          }}
+        />
       )}
     </div>
   );
@@ -378,6 +466,180 @@ function RuntimeRow({
           <Play size={14} weight="fill" />
         </button>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * A row in the permanent "Saved runtimes" list. Covers both used local runtimes
+ * (folded in from detection — live health + Play/Stop) and custom/remote
+ * endpoints (editable URL/key). Health: green/red when known, neutral when an
+ * idle remote endpoint hasn't been probed. Delete removes it from the list (and
+ * won't be auto-re-added). The built-in is never rendered here.
+ */
+function SavedRuntimeRow({
+  name,
+  baseUrl,
+  healthy,
+  active,
+  managed,
+  launchable,
+  installed,
+  editable,
+  onSelect,
+  onStart,
+  onStop,
+  onEdit,
+  onDelete,
+}: {
+  name: string;
+  baseUrl: string;
+  healthy: boolean | undefined;
+  active: boolean;
+  managed: boolean;
+  launchable: boolean;
+  installed: boolean;
+  editable: boolean;
+  onSelect: () => void;
+  onStart?: () => void;
+  onStop?: () => void;
+  onEdit?: () => void;
+  onDelete: () => void;
+}) {
+  const canPlay = launchable && installed && !healthy && !managed;
+  return (
+    <div
+      className={[
+        "group flex w-full items-center gap-2 rounded-xl px-2 py-2 transition",
+        active ? "bg-white/15" : "hover:bg-white/10",
+      ].join(" ")}
+    >
+      {healthy === undefined ? (
+        <span
+          style={{ width: 8, height: 8 }}
+          className="inline-block shrink-0 rounded-full bg-white/25"
+          title="Health unknown — connect to check"
+        />
+      ) : (
+        <HealthDot healthy={healthy} />
+      )}
+      {healthy ? (
+        <PlugsConnected size={14} className="text-white/60" />
+      ) : (
+        <Plugs size={14} className="text-white/40" />
+      )}
+      <button
+        onClick={onSelect}
+        title="Connect to this runtime"
+        className="flex min-w-0 flex-1 flex-col items-start text-left"
+      >
+        <span className="truncate text-xs text-white">{name}</span>
+        <span className="truncate text-[10px] text-white/40">{baseUrl}</span>
+      </button>
+      {managed && onStop ? (
+        <button
+          onClick={onStop}
+          title={`Stop ${name} — shuts down the server AKA started`}
+          className="shrink-0 rounded-lg p-1 text-white/50 transition hover:bg-white/10 hover:text-red-300"
+        >
+          <Stop size={14} weight="fill" />
+        </button>
+      ) : canPlay && onStart ? (
+        <button
+          onClick={onStart}
+          title={`Start ${name} — boots the server in the background`}
+          className="shrink-0 rounded-lg p-1 text-white/50 opacity-0 transition hover:bg-white/10 hover:text-emerald-300 group-hover:opacity-100"
+        >
+          <Play size={14} weight="fill" />
+        </button>
+      ) : null}
+      {editable && onEdit ? (
+        <button
+          onClick={onEdit}
+          title="Edit endpoint / API key"
+          className="shrink-0 rounded-lg p-1 text-white/40 opacity-0 transition hover:bg-white/10 hover:text-white group-hover:opacity-100"
+        >
+          <PencilSimple size={12} />
+        </button>
+      ) : null}
+      <button
+        onClick={onDelete}
+        title="Remove from saved runtimes"
+        className="shrink-0 rounded-lg p-1 text-white/40 opacity-0 transition hover:bg-white/10 hover:text-red-300 group-hover:opacity-100"
+      >
+        <Trash size={13} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Shared Base-URL + API-key form, used both to add a custom endpoint and to edit
+ * a saved one. `saveLabel` distinguishes the two ("Save" vs "Update").
+ */
+function EndpointForm({
+  url,
+  setUrl,
+  apiKey,
+  setApiKey,
+  saving,
+  error,
+  saveLabel,
+  onCancel,
+  onSave,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  apiKey: string;
+  setApiKey: (v: string) => void;
+  saving: boolean;
+  error: string | null;
+  saveLabel: string;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 px-1">
+      <label className="text-[11px] uppercase tracking-wide text-white/50">
+        Base URL
+      </label>
+      <input
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="http://localhost:1234/v1"
+        className="w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-white outline-none placeholder:text-white/30 focus:border-white/40"
+      />
+      <label className="text-[11px] uppercase tracking-wide text-white/50">
+        API key (optional)
+      </label>
+      <input
+        value={apiKey}
+        onChange={(e) => setApiKey(e.target.value)}
+        type="password"
+        placeholder="sk-…"
+        className="w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-white outline-none placeholder:text-white/30 focus:border-white/40"
+      />
+      <p className="px-0.5 text-[10px] leading-relaxed text-white/40">
+        OpenAI-compatible endpoints only (uses <code>/chat/completions</code> +
+        Bearer auth). For Claude, Gemini, etc., point at a gateway like OpenRouter
+        — a raw Anthropic/Google API key won't work here.
+      </p>
+      {error ? <div className="text-[11px] text-red-300">{error}</div> : null}
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="rounded-lg px-2 py-1 text-xs text-white/60 hover:bg-white/10"
+        >
+          Cancel
+        </button>
+        <button
+          disabled={saving || !url.trim()}
+          onClick={onSave}
+          className="rounded-lg bg-white/15 px-3 py-1 text-xs text-white hover:bg-white/25 disabled:opacity-50"
+        >
+          {saving ? "Validating…" : saveLabel}
+        </button>
+      </div>
     </div>
   );
 }

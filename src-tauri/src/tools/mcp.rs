@@ -73,15 +73,27 @@ pub const CONTRACT_V1: &str = "capability-contract: v1";
 
 /// Negotiate the capability contract from a probe's advertised tokens.
 ///
-/// **Phase-2 stub:** the live probe handshake isn't wired yet, so this returns the
-/// safe fallback ([`ContractMode::McpBaseline`]) until an agent actually advertises
-/// v1. The decision rule is already correct so the call sites don't change when the
-/// transport lands.
+/// Consumes the in-band handshake (`@@aka {"announce":"capability-contract",…}`)
+/// token list. The companion [`contract_from_probe`] consumes the upfront
+/// `--äkä-probe` JSON's `capability-contract` field; both apply the identical
+/// v1-or-fallback rule so the two transports can never disagree.
 pub fn negotiate(advertised: &[String]) -> ContractMode {
     if advertised.iter().any(|t| t == CONTRACT_V1) {
         ContractMode::V1
     } else {
         ContractMode::McpBaseline
+    }
+}
+
+/// Negotiate the contract from the `--äkä-probe` JSON's `capability-contract`
+/// field (e.g. `"v1"`). The same decision as [`negotiate`], keyed off the bare
+/// version token the probe reports rather than the full announce string. A peer
+/// that omits the field, or names any version other than v1, falls back to the
+/// MCP-baseline (still fully enforced by the house layer).
+pub fn contract_from_probe(capability_contract: Option<&str>) -> ContractMode {
+    match capability_contract {
+        Some(v) if v.trim().eq_ignore_ascii_case("v1") => ContractMode::V1,
+        _ => ContractMode::McpBaseline,
     }
 }
 
@@ -102,5 +114,18 @@ mod tests {
     #[test]
     fn v1_agent_is_driven() {
         assert_eq!(negotiate(&[CONTRACT_V1.to_string()]), ContractMode::V1);
+    }
+
+    #[test]
+    fn probe_field_negotiates_the_same_way() {
+        // The `--äkä-probe` JSON path agrees with the in-band announce path.
+        assert_eq!(contract_from_probe(Some("v1")), ContractMode::V1);
+        assert_eq!(contract_from_probe(Some("V1")), ContractMode::V1);
+        assert_eq!(contract_from_probe(Some(" v1 ")), ContractMode::V1);
+        // Anything else — a future version, a typo, or an absent field — is the
+        // safe fallback. The house layer still enforces every call in baseline.
+        assert_eq!(contract_from_probe(Some("v2")), ContractMode::McpBaseline);
+        assert_eq!(contract_from_probe(Some("")), ContractMode::McpBaseline);
+        assert_eq!(contract_from_probe(None), ContractMode::McpBaseline);
     }
 }

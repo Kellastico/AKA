@@ -19,6 +19,8 @@
  * structured tool/reasoning activity. That's where the agent's final
  * user-facing reply ends up.
  */
+import type { AgentProbe } from "../tauri/commands";
+
 export type ToolKind = "read" | "write" | "run" | "search";
 
 export type AgentEvent =
@@ -38,6 +40,8 @@ export type AgentEvent =
       path?: string;
       linesAdded?: number;
       linesRemoved?: number;
+      /** Host witness: SHA-256 of the real post-edit content (recorded change). */
+      hash?: string;
     }
   | { type: "reasoning_start" }
   | { type: "reasoning_delta"; text: string }
@@ -49,7 +53,23 @@ export type AgentEvent =
    * so the agent self-reports its actual token usage to drive the host's
    * context meter accurately. Control-plane only — never rendered as content.
    */
-  | { type: "context"; usedTokens: number; contextWindow: number };
+  | { type: "context"; usedTokens: number; contextWindow: number }
+  /**
+   * Host-action control marker — the agent asks the host to drive a capability
+   * on its behalf (e.g. `target: "dev_server"`, `action: "open" | "kill" |
+   * "restart"`), instead of the user clicking the button. The chat store maps it
+   * to the same store action the button uses, so agent- and user-driven control
+   * converge on one server.
+   */
+  | { type: "control"; target: string; action: string }
+  /**
+   * In-band capability announcement — the mid-stream fallback for the
+   * `--äkä-probe` handshake. An agent that prefers not to add a probe flag emits
+   * `@@aka {"announce":"capability-contract",…}` once at startup; the host caches
+   * it for the session exactly as it caches an upfront probe answer. Probe-first:
+   * an upfront answer already in hand is never overridden by the announce.
+   */
+  | { type: "capabilities"; probe: AgentProbe };
 
 /**
  * Stateful line-by-line parser. Implementations buffer partial state

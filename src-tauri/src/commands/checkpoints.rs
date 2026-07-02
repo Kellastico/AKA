@@ -426,6 +426,37 @@ pub async fn run_file_changes(
     }
 }
 
+/// Whether the working tree differs from the run's **prerun** snapshot — i.e. a
+/// real on-disk change has occurred since the run began. This is the outside-the-
+/// agent evidence used to gate EDIT→REVIEW: no change vs the baseline → no advance,
+/// regardless of what the agent claims. Best-effort; returns `false` when there is
+/// no baseline / it isn't a git repo (treated as "no evidence of a change").
+pub async fn changed_since_prerun(
+    state: &CheckpointState,
+    project_path: &str,
+    run_id: &str,
+) -> bool {
+    let prerun = {
+        let runs = state.runs.lock().await;
+        runs.get(run_id)
+            .and_then(|cps| cps.iter().find(|c| c.kind == "prerun").map(|c| c.sha.clone()))
+    };
+    let Some(sha) = prerun else { return false };
+    // Tracked changes vs the baseline commit…
+    let tracked = git(project_path, &["diff", "--numstat", &sha])
+        .await
+        .map(|o| !parse_numstat(&o).is_empty())
+        .unwrap_or(false);
+    if tracked {
+        return true;
+    }
+    // …and newly-created (untracked) files the diff wouldn't show.
+    git(project_path, &["ls-files", "--others", "--exclude-standard"])
+        .await
+        .map(|o| !o.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Roll the working tree back to checkpoint `sha`. A `prerestore` checkpoint is
 /// taken first so the rollback is itself undoable. Mutates the working tree, so
 /// the sandbox is enforced exactly as in `run_agent`.

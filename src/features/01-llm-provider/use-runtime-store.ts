@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
+import { load } from "@tauri-apps/plugin-store";
 import {
   checkRuntimeHealth,
   detectRuntimes,
@@ -15,6 +16,7 @@ import {
 } from "../../lib/tauri/commands";
 import { useProjectConfigStore } from "../../stores/use-project-config-store";
 import { useMessagesStore } from "../../stores/use-messages-store";
+import { usePrefsStore } from "../../stores/use-prefs-store";
 import { findBestModelMatch } from "../../lib/model-match";
 
 const DEFAULT_BASE_URL = "http://localhost:11434/v1";
@@ -86,6 +88,115 @@ export type RuntimeConfig = {
   apiKey: string | null;
 };
 
+/**
+ * A runtime the user has added or used, persisted so it survives launches until
+ * explicitly deleted (the "permanent runtimes" list). Covers custom endpoints
+ * (OpenRouter, a remote vLLM, …) that local-port detection can never find, plus
+ * detected runtimes the user has actually connected to. The ÄKÄ Built-in is
+ * never stored here — it's always shown and can't be deleted.
+ */
+export type SavedRuntime = {
+  baseUrl: string;
+  apiKey: string | null;
+  /** Display label — a custom endpoint's host, or a detected runtime's name. */
+  name: string;
+};
+
+const RUNTIMES_STORE_FILE = "aka-runtimes.json";
+const SAVED_RUNTIMES_KEY = "savedRuntimes";
+const DISMISSED_RUNTIMES_KEY = "dismissedRuntimes";
+
+/** Human label for a saved endpoint — the host, falling back to the raw URL. */
+function labelForUrl(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname || baseUrl;
+  } catch {
+    return baseUrl;
+  }
+}
+
+async function persistSavedRuntimes(list: SavedRuntime[]): Promise<void> {
+  try {
+    const store = await load(RUNTIMES_STORE_FILE, { defaults: {}, autoSave: false });
+    await store.set(SAVED_RUNTIMES_KEY, list);
+    await store.save();
+  } catch {
+    // Outside Tauri (browser dev) — in-memory only.
+  }
+}
+
+async function persistDismissedRuntimes(list: string[]): Promise<void> {
+  try {
+    const store = await load(RUNTIMES_STORE_FILE, { defaults: {}, autoSave: false });
+    await store.set(DISMISSED_RUNTIMES_KEY, list);
+    await store.save();
+  } catch {
+    // Outside Tauri — in-memory only.
+  }
+}
+
+/**
+ * Upsert a runtime into the persisted saved list (keyed by base URL). Remembering
+ * a runtime also clears it from the dismissed set — explicitly using a runtime
+ * un-dismisses it, so a previously-deleted one the user reconnects to comes back.
+ */
+function rememberRuntime(
+  set: (s: Partial<RuntimeState>) => void,
+  get: () => RuntimeState,
+  rt: SavedRuntime,
+) {
+  const next = [...get().savedRuntimes.filter((s) => s.baseUrl !== rt.baseUrl), rt];
+  const prevDismissed = get().dismissedRuntimes;
+  const dismissed = prevDismissed.filter((u) => u !== rt.baseUrl);
+  set({ savedRuntimes: next, dismissedRuntimes: dismissed });
+  void persistSavedRuntimes(next);
+  if (dismissed.length !== prevDismissed.length) void persistDismissedRuntimes(dismissed);
+}
+
+/**
+ * Fold installed detected runtimes into the saved list so the local runtimes the
+ * user actually has (Ollama, MLX, …) appear under "Saved runtimes" without a
+ * manual add — but never re-add one the user explicitly deleted (the dismissed
+ * set). Not-installed/discoverable runtimes are left in the Detected section.
+ * Persists only when something new is added, so the detection poll stays cheap.
+ */
+function syncDetectedIntoSaved(
+  set: (s: Partial<RuntimeState>) => void,
+  get: () => RuntimeState,
+  detected: DetectedRuntime[],
+) {
+  const detectedByUrl = new Map(detected.map((d) => [d.baseUrl, d] as const));
+  const dismissed = new Set(get().dismissedRuntimes);
+  let changed = false;
+
+  // Reconcile names: a saved entry that matches a detected runtime takes the
+  // detected name ("Ollama"), not a hostname-derived label ("localhost") that a
+  // config-hydrated entry may have been saved with. Detected names always win
+  // for detected runtimes.
+  let next = get().savedRuntimes.map((s) => {
+    const d = detectedByUrl.get(s.baseUrl);
+    if (d && d.name && d.name !== s.name) {
+      changed = true;
+      return { ...s, name: d.name };
+    }
+    return s;
+  });
+
+  // Fold in installed detected runtimes not yet saved (and not dismissed).
+  const savedUrls = new Set(next.map((s) => s.baseUrl));
+  const toAdd: SavedRuntime[] = detected
+    .filter((d) => d.installed && !savedUrls.has(d.baseUrl) && !dismissed.has(d.baseUrl))
+    .map((d) => ({ baseUrl: d.baseUrl, apiKey: null, name: d.name }));
+  if (toAdd.length > 0) {
+    next = [...next, ...toAdd];
+    changed = true;
+  }
+
+  if (!changed) return;
+  set({ savedRuntimes: next });
+  void persistSavedRuntimes(next);
+}
+
 export type Toast = {
   id: number;
   /**
@@ -100,6 +211,10 @@ type RuntimeState = {
   initialized: boolean;
   detected: DetectedRuntime[];
   detecting: boolean;
+  /** Persisted runtimes the user added/used — shown until explicitly deleted. */
+  savedRuntimes: SavedRuntime[];
+  /** Base URLs the user deleted from the saved list — never auto-re-added. */
+  dismissedRuntimes: string[];
   active: RuntimeConfig | null;
   healthy: boolean;
   models: string[];
@@ -153,6 +268,18 @@ type RuntimeState = {
   /** Stop a runtime AKA started (the Stop button). */
   stopRuntime: (name: string) => Promise<void>;
   saveManual: (baseUrl: string, apiKey: string | null) => Promise<{ ok: boolean; error?: string }>;
+  /** Remove a runtime from the persisted saved list. The built-in isn't in it. */
+  deleteSavedRuntime: (baseUrl: string) => Promise<void>;
+  /**
+   * Edit a saved runtime's endpoint/key in place. Re-validates the new endpoint;
+   * if the edited one is currently active, re-applies it so the change takes
+   * effect immediately. Returns the same `{ ok, error }` shape as `saveManual`.
+   */
+  editSavedRuntime: (
+    oldBaseUrl: string,
+    baseUrl: string,
+    apiKey: string | null,
+  ) => Promise<{ ok: boolean; error?: string }>;
   selectModel: (modelId: string) => Promise<void>;
   /**
    * Hydrate from the active project's config. Called by AppShell whenever the
@@ -234,6 +361,8 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   initialized: false,
   detected: [],
   detecting: false,
+  savedRuntimes: [],
+  dismissedRuntimes: [],
   active: null,
   healthy: false,
   models: [],
@@ -262,6 +391,20 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       active: { baseUrl: DEFAULT_BASE_URL, apiKey: null },
       selectedModelId: null,
     });
+
+    // Restore the persisted runtimes (custom endpoints + previously-used
+    // detected ones) so they're available across launches until deleted.
+    try {
+      const store = await load(RUNTIMES_STORE_FILE, { defaults: {}, autoSave: false });
+      const saved = await store.get<SavedRuntime[]>(SAVED_RUNTIMES_KEY);
+      const dismissed = await store.get<string[]>(DISMISSED_RUNTIMES_KEY);
+      set({
+        ...(Array.isArray(saved) ? { savedRuntimes: saved } : {}),
+        ...(Array.isArray(dismissed) ? { dismissedRuntimes: dismissed } : {}),
+      });
+    } catch {
+      // Outside Tauri — none.
+    }
 
     await get().initBuiltin();
     await get().refreshDetection();
@@ -303,6 +446,9 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     try {
       const detected = await detectRuntimes();
       set({ detected, detecting: false });
+      // Fold installed local runtimes into the saved list so the ones the user
+      // actually has show under "Saved runtimes" (respecting prior deletions).
+      syncDetectedIntoSaved(set, get, detected);
       // Keep the active runtime's health in sync with the live probe so the
       // top-bar pill's dot flips on its own (matching the detected list) —
       // not just on the 30s health tick. Built-in health is driven by
@@ -359,6 +505,19 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
 
     if (!hasTauri()) return;
     // Subscriptions live for the app's lifetime; the store is a singleton.
+    // Network egress guard (gate_egress): a denied outbound endpoint used to be
+    // emitted here with no listener — a silent failure. Surface it as a visible
+    // toast so a blocked BYOK/cloud endpoint is never silently swallowed.
+    await listen<{ url: string; host: string; allowed: boolean }>(
+      "network://egress",
+      (e) => {
+        if (e.payload.allowed) return;
+        get().pushToast({
+          kind: "error",
+          text: `Network egress blocked: ${e.payload.host || e.payload.url} isn't in this project's allowlist. Add it under Capabilities to permit it.`,
+        });
+      },
+    );
     await listen<number>("runtime:ready", (e) => {
       set({
         builtinStatus: "ready",
@@ -425,6 +584,13 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
   selectDetected: async (runtime) => {
     const cfg: RuntimeConfig = { baseUrl: runtime.baseUrl, apiKey: null };
     set({ active: cfg, healthy: runtime.healthy });
+    // Connecting to a detected runtime makes it "used" — remember it so it stays
+    // in the permanent list even if a later probe doesn't surface it.
+    rememberRuntime(set, get, {
+      baseUrl: runtime.baseUrl,
+      apiKey: null,
+      name: runtime.name,
+    });
     // Persist to the active project's config — immediate save, no batching.
     await useProjectConfigStore.getState().setRuntimeBaseUrl(runtime.baseUrl);
     await useProjectConfigStore.getState().setRuntimeApiKey(null);
@@ -477,9 +643,57 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     }
     const cfg: RuntimeConfig = { baseUrl: trimmed, apiKey: apiKey || null };
     set({ active: cfg, healthy: true });
+    // A validated custom endpoint joins the permanent list (local detection can
+    // never find a remote endpoint like OpenRouter, so this is the only way it
+    // persists).
+    rememberRuntime(set, get, {
+      baseUrl: trimmed,
+      apiKey: apiKey || null,
+      name: labelForUrl(trimmed),
+    });
     await useProjectConfigStore.getState().setRuntimeBaseUrl(trimmed);
     await useProjectConfigStore.getState().setRuntimeApiKey(apiKey || null);
     await refreshModels(set, get, cfg);
+    return { ok: true };
+  },
+
+  deleteSavedRuntime: async (baseUrl) => {
+    // Everything in savedRuntimes is user-removable; the built-in is never here.
+    // Record the deletion so the detection poll doesn't auto-re-add a detected
+    // local runtime the user removed on purpose.
+    const next = get().savedRuntimes.filter((s) => s.baseUrl !== baseUrl);
+    const dismissed = get().dismissedRuntimes.includes(baseUrl)
+      ? get().dismissedRuntimes
+      : [...get().dismissedRuntimes, baseUrl];
+    set({ savedRuntimes: next, dismissedRuntimes: dismissed });
+    await persistSavedRuntimes(next);
+    await persistDismissedRuntimes(dismissed);
+  },
+
+  editSavedRuntime: async (oldBaseUrl, baseUrl, apiKey) => {
+    const trimmed = baseUrl.trim().replace(/\/$/, "");
+    if (!trimmed) return { ok: false, error: "Base URL required" };
+    try {
+      await listRuntimeModels(trimmed, apiKey);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const next = get().savedRuntimes.map((s) =>
+      s.baseUrl === oldBaseUrl
+        ? { baseUrl: trimmed, apiKey: apiKey || null, name: labelForUrl(trimmed) }
+        : s,
+    );
+    set({ savedRuntimes: next });
+    await persistSavedRuntimes(next);
+    // If we just edited the active runtime, re-apply it so the new URL/key take
+    // effect right away (and the project config stays in sync).
+    if (get().active?.baseUrl === oldBaseUrl) {
+      const cfg: RuntimeConfig = { baseUrl: trimmed, apiKey: apiKey || null };
+      set({ active: cfg, healthy: true });
+      await useProjectConfigStore.getState().setRuntimeBaseUrl(trimmed);
+      await useProjectConfigStore.getState().setRuntimeApiKey(apiKey || null);
+      await refreshModels(set, get, cfg);
+    }
     return { ok: true };
   },
 
@@ -495,7 +709,13 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // model pill alongside the agent pill (per-session attachment).
     const { currentSessionId, setSessionMeta } = useMessagesStore.getState();
     if (currentSessionId) {
-      setSessionMeta(currentSessionId, { modelId });
+      // Opt-in (`autoApplyPosture`, default off): drop any explicit posture
+      // override so the session follows the NEW model's recommended posture.
+      // Off → keep the user's choice; nothing auto-changes (Task 2 acceptance).
+      const patch = usePrefsStore.getState().autoApplyPosture
+        ? { modelId, posture: undefined }
+        : { modelId };
+      setSessionMeta(currentSessionId, patch);
     }
     await useProjectConfigStore.getState().setRuntimeModel(modelId);
   },
@@ -523,6 +743,20 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
         active,
         selectedModelId: incomingModel ?? currentModel,
       });
+      // Seed the permanent list from the project's configured runtime so a
+      // custom endpoint (e.g. OpenRouter) surfaces under "Saved runtimes" even
+      // though local detection can't find it — and even if it was configured
+      // before this list existed. The built-in is never saved (always shown,
+      // undeletable); detected local runtimes are de-duped at render time.
+      const builtinPort = get().builtinPort;
+      const builtinUrl = builtinPort != null ? builtinEndpoint(builtinPort) : null;
+      if (active.baseUrl && active.baseUrl !== builtinUrl) {
+        rememberRuntime(set, get, {
+          baseUrl: active.baseUrl,
+          apiKey: active.apiKey ?? null,
+          name: labelForUrl(active.baseUrl),
+        });
+      }
       const healthy = await checkRuntimeHealth(
         active.baseUrl,
         active.apiKey ?? null,

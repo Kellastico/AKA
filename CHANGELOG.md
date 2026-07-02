@@ -3,6 +3,41 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.4.1
+
+### Added
+- **Saved (permanent) runtimes.** Custom endpoints (OpenRouter, remote vLLM, …)
+  and the local runtimes you actually use now persist across launches in a
+  **Saved runtimes** list — shown above Detected — with live health, an editable
+  Base URL / API key, and a delete. Detected names (e.g. Ollama) are reconciled
+  so a hydrated endpoint no longer shows as "localhost".
+- **Search in the model & agent pickers.** Once a list passes ~10 entries, a
+  frosted search field appears so you can filter instead of scrolling.
+- **Agents can drive the dev server.** An agent can open / kill / restart the
+  same dev server as the Start Dev Server button via an `@@aka` control marker.
+- **Capability probe + posture hint.** A per-session `--äkä-probe` handshake
+  auto-locks the model picker for agents that own their LLM connection, and the
+  picker shows an advisory posture recommendation for the selected model.
+
+### Fixed
+- **Modals no longer close when you switch apps.** The runtime/model/agent
+  popovers close only on an in-app outside-click — switching to a password
+  manager to grab an API key no longer dismisses them mid-edit.
+- **Blocked network egress is now visible.** A denied (non-allowlisted) endpoint
+  surfaces a toast instead of failing silently.
+
+### Changed
+- **Clearer custom-endpoint expectations.** The Add-custom-endpoint form notes
+  that AKA speaks **OpenAI-compatible** endpoints (`/chat/completions` + Bearer
+  auth); for Claude/Gemini, point at a gateway like OpenRouter — a raw
+  Anthropic/Google API key won't work directly.
+
+### Under the hood
+- Groundwork for the host-driven built-in agent loop: a single unified tool
+  catalog projected to both surfaces (agent CLI + model), execution-enforcement
+  primitives (phase gate, edit witness, approval-gated delete), and a native
+  tool-calling backend. These are foundations — not yet wired into a live loop.
+
 ## 1.3.2
 
 ### Changed

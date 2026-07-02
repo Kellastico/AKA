@@ -12,6 +12,7 @@ import {
   useRuntimeStore,
 } from "../features/01-llm-provider/use-runtime-store";
 import { useWorkspaceStore } from "./use-workspace-store";
+import { useDevServerStore } from "./use-dev-server-store";
 import { parserForAgent } from "../lib/agent-parsers";
 import {
   abortRuntime,
@@ -23,6 +24,7 @@ import {
   restartRuntime,
   answerAgent,
   runAgent,
+  probeAgentCapabilities,
   stopAgent,
   pauseAgent,
   resumeAgent,
@@ -38,8 +40,11 @@ import {
   type Checkpoint,
   type CheckpointCreated,
   type ContentPart,
+  type ContractMode,
+  type AgentPosture,
 } from "../lib/tauri/commands";
 import { resolveVision } from "../lib/model-capabilities";
+import { classifyModel, postureToDial, type Posture } from "../lib/model-posture";
 import { buildTaskEnvelope } from "../features/08-context-engine/task-envelope";
 import { gateForRun } from "../lib/session-concurrency";
 
@@ -852,6 +857,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
           visionModel: resolveVision(modelId, cfg?.runtime.vision),
         });
 
+        // Capability probe (Phase 5): on this session's FIRST agent run, ask the
+        // agent to describe itself via `--äkä-probe`. A probe-answering agent
+        // (Änyä/Enyö) auto-enables the rich treatment — model lock, stream panel,
+        // host-driven phase routing — purely from what it advertised; a foreign
+        // agent that ignores the flag caches a plain result and self-drives, with
+        // no error and no UI penalty. Fire-and-forget so it never delays the run
+        // or first paint, and cache per session (never re-probe per task). The
+        // in-band `@@aka {"announce":…}` marker remains a mid-stream fallback.
+        if (ownerSessionId) {
+          const sid = ownerSessionId;
+          const meta = useMessagesStore.getState().sessionMeta[sid];
+          if (meta?.probe === undefined) {
+            void probeAgentCapabilities(projectPath).then((probe) => {
+              useMessagesStore.getState().setSessionMeta(sid, { probe });
+            });
+          }
+        }
+
         // Checkpoints: make sure the global listeners are live, remember this
         // run's task (for `restart`), and probe whether the project is a git
         // repo so the UI can show "checkpoints unavailable" when it isn't.
@@ -1166,6 +1189,69 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   useTokenCounterStore
                     .getState()
                     .setAgentContext(event.usedTokens, event.contextWindow);
+                } else if (event.type === "capabilities") {
+                  // In-band capability announcement — the fallback transport.
+                  // Cache it for the session exactly as an upfront `--äkä-probe`
+                  // answer is cached, but PROBE-FIRST: never override an upfront
+                  // answer already in hand. Drives the same capability UI.
+                  if (ownerSessionId) {
+                    const sid = ownerSessionId;
+                    const meta = useMessagesStore.getState().sessionMeta[sid];
+                    if (!meta?.probe?.answered) {
+                      const cc = event.probe["capability-contract"];
+                      const contract: ContractMode =
+                        typeof cc === "string" &&
+                        cc.trim().toLowerCase() === "v1"
+                          ? "v1"
+                          : "mcp-baseline";
+                      useMessagesStore.getState().setSessionMeta(sid, {
+                        probe: {
+                          answered: true,
+                          contract,
+                          capabilities: event.probe,
+                        },
+                      });
+                    }
+                  }
+                } else if (event.type === "control") {
+                  // The agent asked the host to drive a capability. Route dev-
+                  // server control to the SAME store the "Start Dev Server"
+                  // button uses, so agent- and user-driven control converge on
+                  // one server (with URL detection + Preview wiring). Confirm
+                  // visibly via a toast.
+                  if (event.target === "dev_server") {
+                    const dev = useDevServerStore.getState();
+                    const action = event.action.toLowerCase();
+                    const done =
+                      action === "kill" || action === "stop"
+                        ? "stopped"
+                        : action === "restart"
+                          ? "restarted"
+                          : "started";
+                    void (async () => {
+                      try {
+                        if (action === "kill" || action === "stop") {
+                          await dev.stop();
+                        } else if (action === "restart") {
+                          await dev.stop();
+                          await dev.start(projectPath);
+                        } else {
+                          await dev.start(projectPath);
+                        }
+                        useRuntimeStore.getState().pushToast({
+                          kind: "info",
+                          text: `Agent ${done} the dev server.`,
+                        });
+                      } catch (err) {
+                        useRuntimeStore.getState().pushToast({
+                          kind: "error",
+                          text: `Dev server ${action} failed: ${
+                            err instanceof Error ? err.message : String(err)
+                          }`,
+                        });
+                      }
+                    })();
+                  }
                 } else {
                   // text → count chars for TPS, then route through <think> parser
                   agentCharCount += event.text.length;
@@ -1241,6 +1327,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
               kind: a.kind,
               path: a.path,
             }));
+            // Capability dial (Task 3): derive this spawned agent's posture from
+            // the model classification + the session's chosen posture (or the
+            // model's recommendation), and emit it as the AGENT_* env dial. None
+            // collapses to the thinnest real harness here — a subprocess agent
+            // IS being spawned, so "no harness" isn't an option for it; the dial
+            // is a no-op for agents that don't honor it.
+            const cap = classifyModel(modelId);
+            const overridePosture =
+              useMessagesStore.getState().sessionMeta[ownerSessionId ?? ""]
+                ?.posture;
+            const effectivePosture: Posture = overridePosture ?? cap.recommended;
+            const dialPosture: Posture =
+              effectivePosture === "none" ? "thin" : effectivePosture;
+            const dial = postureToDial(dialPosture, cap.nativeToolCalling);
+            const posture: AgentPosture | undefined = dial
+              ? {
+                  profile: cap.profile,
+                  toolcall: dial.toolcall,
+                  gating: dial.gating,
+                  leash: dial.leash,
+                }
+              : undefined;
+
             await runAgent(
               task,
               projectPath,
@@ -1250,6 +1359,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               active?.apiKey ?? null,
               imagePaths,
               attachmentMeta,
+              posture,
             );
           }
           agentCleanExit = true;
