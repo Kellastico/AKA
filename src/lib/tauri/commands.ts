@@ -1517,3 +1517,36 @@ export async function openExternalUrl(url: string): Promise<void> {
   }
   return invoke("open_external_url", { url });
 }
+
+// ---------- MCP servers (plugin system) ----------
+
+/**
+ * One tool as a foreign MCP server advertises it (Rust `ForeignToolDecl`).
+ * `annotations` reuses the registry section's `McpAnnotations` type above.
+ */
+export type ForeignToolDecl = {
+  name: string;
+  description: string;
+  annotations: McpAnnotations;
+};
+
+/**
+ * Connect to a local stdio MCP server (spawn → initialize → tools/list →
+ * kill), cache its tools for `toolRegistry`, and return what was discovered.
+ * Discovery only — AKA never dispatches tools/call. Re-running for the same
+ * `name` replaces the previous discovery.
+ */
+export async function mcpDiscover(
+  name: string,
+  command: string,
+  args: string[],
+): Promise<ForeignToolDecl[]> {
+  if (!hasTauri()) return [];
+  return invoke<ForeignToolDecl[]>("mcp_discover", { name, command, args });
+}
+
+/** Drop a server's cached discovery (its tools leave the registry view). */
+export async function mcpForget(name: string): Promise<void> {
+  if (!hasTauri()) return;
+  return invoke("mcp_forget", { name });
+}
