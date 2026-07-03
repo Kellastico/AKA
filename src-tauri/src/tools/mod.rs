@@ -137,11 +137,20 @@ pub async fn tool_manifest(project_path: String) -> Result<ToolManifest, String>
 
 /// Host-facing view of the tool registry for a project — the full [`registry::
 /// ToolEntry`] list (folder, owner, scope policy, sha256, annotations). For the UI
-/// only; this is *not* the model-facing surface. Currently the House built-in
-/// pantry; foreign (Agent) tools join once the MCP transport lands (phase 2).
+/// only; this is *not* the model-facing surface. The House built-in pantry plus
+/// every tool discovered from the user's connected MCP servers, each appended
+/// through `Registry::add_foreign` (untrusted, Agent-owned, deny-by-default
+/// folder from its annotations).
 #[tauri::command]
-pub async fn tool_registry(_project_path: String) -> Result<registry::Registry, String> {
-    Ok(registry::Registry::from_builtins())
+pub async fn tool_registry(
+    _project_path: String,
+    mcp_cache: tauri::State<'_, crate::commands::mcp::McpToolCache>,
+) -> Result<registry::Registry, String> {
+    let mut reg = registry::Registry::from_builtins();
+    for d in mcp_cache.all_decls()? {
+        reg.add_foreign(&d.name, &d.description, d.annotations);
+    }
+    Ok(reg)
 }
 
 /// Model-facing tool surface for a given phase — **only** name + `model_desc` of

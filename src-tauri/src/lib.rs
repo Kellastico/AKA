@@ -26,6 +26,7 @@ pub fn run() {
         .manage(commands::files::WatcherState::default())
         .manage(commands::llm::LlmStreamState::default())
         .manage(commands::llm::RuntimeLauncher::default())
+        .manage(commands::mcp::McpToolCache::default())
         .manage(commands::shell_run::ShellRunnerState::default())
         .manage(commands::models::DownloadState::default())
         .manage(sandbox::SandboxState::default())
@@ -124,6 +125,8 @@ pub fn run() {
             tools::tool_manifest,
             tools::tool_registry,
             tools::phase_tools,
+            commands::mcp::mcp_discover,
+            commands::mcp::mcp_forget,
         ])
         .build(tauri::generate_context!())
         .expect("error while building AKA")

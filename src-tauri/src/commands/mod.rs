@@ -5,6 +5,7 @@ pub mod dev_server;
 pub mod diff;
 pub mod files;
 pub mod llm;
+pub mod mcp;
 pub mod models;
 pub mod probe;
 pub mod project_config;
