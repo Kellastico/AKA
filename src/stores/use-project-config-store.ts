@@ -59,6 +59,13 @@ type ProjectConfigState = {
   setToolsMode: (mode: string) => Promise<void>;
   /** Master switch for advertising AKA's built-in tools to the agent. */
   setToolsEnabled: (enabled: boolean) => Promise<void>;
+  /**
+   * Replace the project's network egress allowlist
+   * (`capabilities.network_allowlist`). Entries are hosts or URL prefixes;
+   * the backend re-reads the config from disk on every LLM call, so changes
+   * apply to the next call — no restart.
+   */
+  setNetworkAllowlist: (entries: string[]) => Promise<void>;
   // NOTE: The model-tuning fields (runtime.system_prompt / temperature / top_p /
   // vision, and task_template) are intentionally edited at the .äkä/config.json
   // level for now — there is deliberately no in-app setter/UI yet. The backend
@@ -326,6 +333,16 @@ export const useProjectConfigStore = create<ProjectConfigState>((set, get) => ({
     const { projectPath, config } = get();
     if (!projectPath || !config) return;
     const next = { ...config, tools: { ...config.tools, enabled } };
+    await persist(set, projectPath, next);
+  },
+
+  setNetworkAllowlist: async (entries) => {
+    const { projectPath, config } = get();
+    if (!projectPath || !config) return;
+    const next = {
+      ...config,
+      capabilities: { ...config.capabilities, network_allowlist: entries },
+    };
     await persist(set, projectPath, next);
   },
 }));

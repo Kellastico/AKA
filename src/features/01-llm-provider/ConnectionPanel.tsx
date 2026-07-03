@@ -20,6 +20,7 @@ import {
 } from "./use-runtime-store";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import type { DetectedRuntime, SidecarStatusValue } from "../../lib/tauri/commands";
+import { AllowlistSection } from "./AllowlistSection";
 
 export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
   const detected = useRuntimeStore((s) => s.detected);
@@ -277,6 +278,10 @@ export function ConnectionPanel({ onDone }: { onDone?: () => void }) {
           }}
         />
       )}
+
+      <div className="h-px bg-white/10" />
+
+      <AllowlistSection />
     </div>
   );
 }
