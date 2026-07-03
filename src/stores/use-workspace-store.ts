@@ -1,6 +1,13 @@
 import { create } from "zustand";
 
-export type PaneType = "output" | "diff" | "files" | "console" | "file" | "browser";
+export type PaneType =
+  | "output"
+  | "diff"
+  | "files"
+  | "console"
+  | "file"
+  | "browser"
+  | "history";
 export type PaneSide = "left" | "right";
 
 export type ExtraPane = {
@@ -190,4 +197,5 @@ export const PANE_LABELS: Record<PaneType, string> = {
   console: "Terminal",
   file: "File",
   browser: "Preview",
+  history: "History",
 };

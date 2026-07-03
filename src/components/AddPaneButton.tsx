@@ -6,6 +6,7 @@ import {
   FileText,
   TerminalWindow,
   Browser,
+  ClockCounterClockwise,
   type Icon,
 } from "@phosphor-icons/react";
 import {
@@ -23,9 +24,17 @@ const PANE_ICONS: Record<PaneType, Icon> = {
   console: TerminalWindow,
   file: FileText,
   browser: Browser,
+  history: ClockCounterClockwise,
 };
 
-const PICKER_TYPES: PaneType[] = ["output", "diff", "files", "console", "browser"];
+const PICKER_TYPES: PaneType[] = [
+  "output",
+  "diff",
+  "files",
+  "console",
+  "browser",
+  "history",
+];
 
 export function AddPaneButton() {
   const ref = useRef<HTMLButtonElement>(null);

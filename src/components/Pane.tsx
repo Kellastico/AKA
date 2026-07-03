@@ -12,6 +12,7 @@ import { FileContent } from "./pane-content/FileContent";
 import { FilesContent } from "../features/05-file-explorer/FilesContent";
 import { MarkdownPane } from "./pane-content/MarkdownPane";
 import { OutputContent } from "../features/06-output-console/OutputContent";
+import { HistoryContent } from "../features/07-history/HistoryContent";
 
 const isMarkdownPath = (p?: string | null) =>
   !!p && /\.(md|mdx|markdown)$/i.test(p);
@@ -80,6 +81,8 @@ export function Pane({ pane }: { pane: ExtraPane }) {
           <OutputContent />
         ) : pane.type === "console" ? (
           <ConsoleContent />
+        ) : pane.type === "history" ? (
+          <HistoryContent />
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-white/25">
             {PANE_LABELS[pane.type]} content
