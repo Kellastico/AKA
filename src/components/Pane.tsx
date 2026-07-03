@@ -6,12 +6,12 @@ import {
 } from "../stores/use-workspace-store";
 import { Tooltip } from "./Tooltip";
 import { BrowserContent } from "./pane-content/BrowserContent";
-import { ConsoleContent } from "./pane-content/ConsoleContent";
-import { DiffContent } from "./pane-content/DiffContent";
+import { ConsoleContent } from "../features/06-output-console/ConsoleContent";
+import { DiffContent } from "../features/04-diff-viewer/DiffContent";
 import { FileContent } from "./pane-content/FileContent";
-import { FilesContent } from "./pane-content/FilesContent";
+import { FilesContent } from "../features/05-file-explorer/FilesContent";
 import { MarkdownPane } from "./pane-content/MarkdownPane";
-import { OutputContent } from "./pane-content/OutputContent";
+import { OutputContent } from "../features/06-output-console/OutputContent";
 
 const isMarkdownPath = (p?: string | null) =>
   !!p && /\.(md|mdx|markdown)$/i.test(p);

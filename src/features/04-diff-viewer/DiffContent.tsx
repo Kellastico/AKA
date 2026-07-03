@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowClockwise, GitBranch } from "@phosphor-icons/react";
 import { gitDiff } from "../../lib/tauri/commands";
 import { useProjectsStore } from "../../stores/use-projects-store";
-import { Tooltip } from "../Tooltip";
+import { Tooltip } from "../../components/Tooltip";
 
 type DiffLine = {
   kind: "context" | "add" | "remove" | "hunk" | "fileheader";

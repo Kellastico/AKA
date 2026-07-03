@@ -5,7 +5,7 @@ import { useShellRunnerStore } from "../../stores/use-shell-runner-store";
 import { useAgentRunnerStore } from "../../features/02-agent-runner/use-agent-runner-store";
 import { useTaskWorkspaceStore } from "../../features/03-task-workspace/use-task-workspace-store";
 import { useProjectsStore } from "../../stores/use-projects-store";
-import { Tooltip } from "../Tooltip";
+import { Tooltip } from "../../components/Tooltip";
 
 /**
  * Compact display path for prompts/headers. Replaces a `/Users/<name>/` prefix

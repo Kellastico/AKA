@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Broom, Stop } from "@phosphor-icons/react";
 import { useDevServerStore } from "../../stores/use-dev-server-store";
-import { Tooltip } from "../Tooltip";
+import { Tooltip } from "../../components/Tooltip";
 
 /**
  * Streaming text view for the dev-server process. Subscribed via Zustand to
