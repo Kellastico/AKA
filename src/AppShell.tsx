@@ -10,6 +10,7 @@ import { FirstRunOverlay } from "./components/first-run/FirstRunOverlay";
 import { useAskUserStore } from "./stores/use-ask-user-store";
 import { useFirstRunStore } from "./stores/use-first-run-store";
 import { useBootstrapRuntime } from "./features/01-llm-provider/ConnectionPanel";
+import { useBootstrapMcp } from "./features/10-plugin-system/PluginsButton";
 import { RuntimeToasts } from "./features/01-llm-provider/RuntimeToasts";
 import { ModelBrowser } from "./features/01-llm-provider/ModelBrowser";
 import { useAgentsStore } from "./stores/use-agents-store";
@@ -30,6 +31,7 @@ import { useDropAttachments } from "./lib/use-drop-attachments";
 
 export function AppShell() {
   useBootstrapRuntime();
+  useBootstrapMcp();
   useTokenCounterSync();
   useSessionMessagesSync();
   useDropAttachments();

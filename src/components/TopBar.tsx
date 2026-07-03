@@ -1,6 +1,7 @@
 import { AddPaneButton } from "./AddPaneButton";
 import { Omnibox } from "./Omnibox";
 import { RuntimeButton } from "../features/01-llm-provider/RuntimeButton";
+import { PluginsButton } from "../features/10-plugin-system/PluginsButton";
 
 // macOS traffic-light cluster sits at ~(20, center) and spans ~68px wide.
 // Reserve a bit more so the search input never collides with hover targets.
@@ -13,8 +14,9 @@ export function TopBar() {
       className="relative flex h-14 shrink-0 items-center pr-4"
       style={{ paddingLeft: TRAFFIC_LIGHT_RESERVE }}
     >
-      <div className="shrink-0">
+      <div className="flex shrink-0 items-center gap-2">
         <RuntimeButton />
+        <PluginsButton />
       </div>
       <div className="ml-auto shrink-0">
         <AddPaneButton />
