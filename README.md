@@ -63,7 +63,7 @@ These aren't aspirations — they're constraints that every decision gets measur
 | 1  | LLM Provider Manager | Detect and connect any OpenAI-compatible runtime    |
 | 2  | Agent Runner         | Spawn any agent binary in a PTY; stream output live |
 | 3  | Task Workspace       | Describe work → launch it → review the result       |
-| 4  | Diff Viewer          | Monaco-based review of exactly what changed         |
+| 4  | Diff Viewer          | Line-by-line review of exactly what changed — colored add/remove rows, per-file headers, live +/− counts, one-click refresh |
 | 5  | File Explorer        | Browse the project sandbox                          |
 | 6  | Streaming Console    | Real terminal output via xterm                      |
 | 7  | Task History         | Every past run, browseable                          |
@@ -90,7 +90,7 @@ See [`src/features/02-agent-runner/Context.md`](src/features/02-agent-runner/Con
 | Frontend      | React 18 + TypeScript    |
 | Bundler       | Vite                     |
 | State         | Zustand                  |
-| Editor / Diff | Monaco                   |
+| Diff review   | Custom unified-diff viewer over `git diff` |
 | Terminal      | Xterm.js                 |
 | Styling       | Tailwind CSS v4          |
 
