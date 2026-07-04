@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex};
 
+use crate::commands::message_validator as validator;
 use crate::commands::project_config::load_from_disk;
 use crate::error::AppError;
 
@@ -370,6 +371,14 @@ pub async fn call_llm_tools(
     if project_path.trim().is_empty() {
         return Err(AppError::RuntimeOffline);
     }
+    // Last gate before the provider: normalize the loop history so no provider
+    // ever sees an empty/malformed message. Refuse (client-side) when nothing
+    // valid remains instead of sending a request we know is invalid.
+    let (messages, removed) = validator::sanitize(&messages);
+    validator::log_removals(&removed);
+    if !validator::has_non_system(&messages) {
+        return Err(AppError::invalid_conversation());
+    }
     let cfg = load_from_disk(&project_path).await?;
     gate_egress(&app, &cfg.runtime.base_url, &cfg.capabilities)?;
     let runtime = cfg.runtime;
@@ -383,42 +392,100 @@ pub async fn call_llm_tools(
         .build()
         .map_err(|_| AppError::RuntimeOffline)?;
 
-    let mut req = client
-        .post(format!(
-            "{}/chat/completions",
-            runtime.base_url.trim_end_matches('/')
-        ))
-        .json(&ToolChatRequest {
-            model: &model_id,
-            messages: &messages,
-            tools: &tools,
-            tool_choice: "auto",
-        });
-    if let Some(key) = runtime.api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
+    use crate::commands::providers::{
+        anthropic_request, chat_url, google_chat_url, google_request, parse_anthropic_response,
+        parse_google_response, resolve_provider, Provider,
+    };
+    let provider = resolve_provider(runtime.provider.as_deref(), &runtime.base_url);
+    let req = match provider {
+        Provider::OpenAiCompatible => client
+            .post(chat_url(provider, &runtime.base_url))
+            .json(&ToolChatRequest {
+                model: &model_id,
+                messages: &messages,
+                tools: &tools,
+                tool_choice: "auto",
+            }),
+        Provider::Anthropic => {
+            let tool_values: Vec<serde_json::Value> = tools
+                .iter()
+                .filter_map(|t| serde_json::to_value(t).ok())
+                .collect();
+            client
+                .post(chat_url(provider, &runtime.base_url))
+                .json(&anthropic_request(
+                    &model_id,
+                    &messages,
+                    Some(&tool_values),
+                    false,
+                    None,
+                    None,
+                ))
+        }
+        Provider::Google => {
+            let tool_values: Vec<serde_json::Value> = tools
+                .iter()
+                .filter_map(|t| serde_json::to_value(t).ok())
+                .collect();
+            client
+                .post(google_chat_url(&runtime.base_url, &model_id, false))
+                .json(&google_request(&messages, Some(&tool_values), None, None))
+        }
+    };
+    let req = apply_provider_auth(req, provider, runtime.api_key.as_deref());
+
+    // Transport failure (connect/timeout) = runtime offline. A non-2xx answer
+    // is a different animal: the endpoint is up and rejected the request — an
+    // API error, surfaced with the provider's own message.
+    let resp = req.send().await.map_err(|_| AppError::RuntimeOffline)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::provider_rejected(
+            status.as_u16(),
+            crate::commands::providers::provider_error_message(&body),
+        ));
+    }
+    match provider {
+        Provider::OpenAiCompatible => {
+            let body: ToolChatResponse = resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
+            let msg = body
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message)
+                .ok_or(AppError::RuntimeOffline)?;
+            let content = msg.content.as_deref().map(strip_think).filter(|s| !s.is_empty());
+            let reasoning = msg.reasoning.or(msg.reasoning_content).filter(|s| !s.trim().is_empty());
+            Ok(AssistantTurn {
+                content,
+                tool_calls: msg.tool_calls.unwrap_or_default(),
+                reasoning,
+            })
+        }
+        Provider::Anthropic | Provider::Google => {
+            let body: serde_json::Value =
+                resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
+            let turn = if provider == Provider::Anthropic {
+                parse_anthropic_response(&body)
+            } else {
+                parse_google_response(&body)
+            };
+            Ok(AssistantTurn {
+                content: turn.content,
+                tool_calls: turn
+                    .tool_calls
+                    .into_iter()
+                    .map(|(id, name, arguments)| ToolCall {
+                        id,
+                        kind: Some("function".into()),
+                        function: ToolCallFunction { name, arguments },
+                    })
+                    .collect(),
+                reasoning: turn.reasoning,
+            })
         }
     }
-
-    let resp = req.send().await.map_err(|_| AppError::RuntimeOffline)?;
-    if !resp.status().is_success() {
-        return Err(AppError::RuntimeOffline);
-    }
-    let body: ToolChatResponse = resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
-    let msg = body
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message)
-        .ok_or(AppError::RuntimeOffline)?;
-
-    let content = msg.content.as_deref().map(strip_think).filter(|s| !s.is_empty());
-    let reasoning = msg.reasoning.or(msg.reasoning_content).filter(|s| !s.trim().is_empty());
-    Ok(AssistantTurn {
-        content,
-        tool_calls: msg.tool_calls.unwrap_or_default(),
-        reasoning,
-    })
 }
 
 /// A local runtime we know how to look for. `base_url` is its published default
@@ -548,7 +615,24 @@ fn is_installed(probe: &Probe, dirs: &[PathBuf]) -> bool {
         .any(|name| roots.iter().any(|r| r.join(format!("{name}.app")).exists()))
 }
 
+/// Apply a provider's auth headers to a request. The provider abstraction keeps
+/// non-OpenAI APIs (Anthropic's `x-api-key` + version header) working through
+/// the same seams as Bearer-auth endpoints.
+fn apply_provider_auth(
+    mut req: reqwest::RequestBuilder,
+    provider: crate::commands::providers::Provider,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    for (name, value) in
+        crate::commands::providers::auth_headers(provider, api_key.unwrap_or_default())
+    {
+        req = req.header(name, value);
+    }
+    req
+}
+
 async fn check_health(base_url: &str, api_key: Option<&str>) -> bool {
+    use crate::commands::providers::{models_url, resolve_provider};
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()
@@ -556,12 +640,12 @@ async fn check_health(base_url: &str, api_key: Option<&str>) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let mut req = client.get(format!("{}/models", base_url.trim_end_matches('/')));
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
-    }
+    let provider = resolve_provider(None, base_url);
+    let req = apply_provider_auth(
+        client.get(models_url(provider, base_url)),
+        provider,
+        api_key,
+    );
     match req.send().await {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
@@ -750,19 +834,26 @@ pub async fn list_models(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<Vec<String>, String> {
+    use crate::commands::providers::{models_url, resolve_provider};
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("client: {e}"))?;
-    let mut req = client.get(format!("{}/models", base_url.trim_end_matches('/')));
-    if let Some(key) = api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
-    }
+    let provider = resolve_provider(None, &base_url);
+    let req = apply_provider_auth(
+        client.get(models_url(provider, &base_url)),
+        provider,
+        api_key.as_deref(),
+    );
     let resp = req.send().await.map_err(|e| format!("request: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
+    }
+    // Google's list shape is `{models:[{name:"models/…"}]}`; everyone else
+    // (incl. Anthropic) speaks the OpenAI `{data:[{id}]}` shape.
+    if provider == crate::commands::providers::Provider::Google {
+        let body: serde_json::Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
+        return Ok(crate::commands::providers::parse_google_models(&body));
     }
     let body: ModelsResponse = resp.json().await.map_err(|e| format!("parse: {e}"))?;
     Ok(body.data.into_iter().map(|m| m.id).collect())
@@ -789,6 +880,12 @@ pub async fn call_llm(
     if project_path.trim().is_empty() {
         return Err(AppError::RuntimeOffline);
     }
+    // Validate before any provider request (same gate as call_llm_tools).
+    let (messages, removed) = validator::sanitize_typed(&messages);
+    validator::log_removals(&removed);
+    if !messages.iter().any(|m| m.role != "system") {
+        return Err(AppError::invalid_conversation());
+    }
     let cfg = load_from_disk(&project_path).await?;
     // Cloud = a `network` action: loopback is ungated, remote must be allowlisted.
     gate_egress(&app, &cfg.runtime.base_url, &cfg.capabilities)?;
@@ -803,35 +900,75 @@ pub async fn call_llm(
         .build()
         .map_err(|_| AppError::RuntimeOffline)?;
 
-    let mut req = client
-        .post(format!(
-            "{}/chat/completions",
-            runtime.base_url.trim_end_matches('/')
-        ))
-        .json(&ChatRequest {
-            model: &model_id,
-            messages: &messages,
-        });
-    if let Some(key) = runtime.api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
+    use crate::commands::providers::{
+        anthropic_request, chat_url, google_chat_url, google_request, parse_anthropic_response,
+        parse_google_response, resolve_provider, Provider,
+    };
+    let provider = resolve_provider(runtime.provider.as_deref(), &runtime.base_url);
+    let req = match provider {
+        Provider::OpenAiCompatible => client
+            .post(chat_url(provider, &runtime.base_url))
+            .json(&ChatRequest {
+                model: &model_id,
+                messages: &messages,
+            }),
+        Provider::Anthropic => {
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(chat_url(provider, &runtime.base_url))
+                .json(&anthropic_request(&model_id, &msgs, None, false, None, None))
+        }
+        Provider::Google => {
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(google_chat_url(&runtime.base_url, &model_id, false))
+                .json(&google_request(&msgs, None, None, None))
+        }
+    };
+    let req = apply_provider_auth(req, provider, runtime.api_key.as_deref());
+
+    // Connection or timeout errors == runtime offline ("start your local
+    // server"). A non-2xx answer is an API error — the endpoint is up and
+    // rejected the request — surfaced with the provider's own message.
+    let resp = req.send().await.map_err(|_| AppError::RuntimeOffline)?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AppError::provider_rejected(
+            status.as_u16(),
+            crate::commands::providers::provider_error_message(&body),
+        ));
+    }
+    match provider {
+        Provider::OpenAiCompatible => {
+            let body: ChatCompletionResponse =
+                resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
+            body.choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content)
+                .map(|s| strip_think(&s))
+                .ok_or(AppError::RuntimeOffline)
+        }
+        Provider::Anthropic | Provider::Google => {
+            let body: serde_json::Value =
+                resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
+            let turn = if provider == Provider::Anthropic {
+                parse_anthropic_response(&body)
+            } else {
+                parse_google_response(&body)
+            };
+            turn.content
+                .map(|s| strip_think(&s))
+                .ok_or(AppError::RuntimeOffline)
         }
     }
-
-    // Connection or timeout errors == runtime offline. Anything else (HTTP
-    // 5xx, malformed body) also folds into RuntimeOffline so the UI can
-    // surface the same actionable banner: "start your local server."
-    let resp = req.send().await.map_err(|_| AppError::RuntimeOffline)?;
-    if !resp.status().is_success() {
-        return Err(AppError::RuntimeOffline);
-    }
-    let body: ChatCompletionResponse = resp.json().await.map_err(|_| AppError::RuntimeOffline)?;
-    body.choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .map(|s| strip_think(&s))
-        .ok_or(AppError::RuntimeOffline)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -872,39 +1009,77 @@ pub async fn summarize_session(
             content: MessageContent::Text(history),
         },
     ];
+    // Same pre-flight gate as every provider path: an empty history would
+    // otherwise produce an empty user message the provider rejects.
+    let (summary_messages, removed) = validator::sanitize_typed(&summary_messages);
+    validator::log_removals(&removed);
+    if !summary_messages.iter().any(|m| m.role != "system") {
+        return Err(AppError::SummarizationFailed);
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|_| AppError::SummarizationFailed)?;
 
-    let mut req = client
-        .post(format!(
-            "{}/chat/completions",
-            runtime.base_url.trim_end_matches('/')
-        ))
-        .json(&ChatRequest {
-            model: &runtime.model,
-            messages: &summary_messages,
-        });
-    if let Some(key) = runtime.api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
+    use crate::commands::providers::{
+        anthropic_request, chat_url, google_chat_url, google_request, parse_anthropic_response,
+        parse_google_response, resolve_provider, Provider,
+    };
+    let provider = resolve_provider(None, &runtime.base_url);
+    let req = match provider {
+        Provider::OpenAiCompatible => client
+            .post(chat_url(provider, &runtime.base_url))
+            .json(&ChatRequest {
+                model: &runtime.model,
+                messages: &summary_messages,
+            }),
+        Provider::Anthropic => {
+            let msgs: Vec<serde_json::Value> = summary_messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(chat_url(provider, &runtime.base_url))
+                .json(&anthropic_request(&runtime.model, &msgs, None, false, None, None))
         }
-    }
+        Provider::Google => {
+            let msgs: Vec<serde_json::Value> = summary_messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(google_chat_url(&runtime.base_url, &runtime.model, false))
+                .json(&google_request(&msgs, None, None, None))
+        }
+    };
+    let req = apply_provider_auth(req, provider, runtime.api_key.as_deref());
 
     let resp = req.send().await.map_err(|_| AppError::SummarizationFailed)?;
     if !resp.status().is_success() {
         return Err(AppError::SummarizationFailed);
     }
-    let body: ChatCompletionResponse = resp
-        .json()
-        .await
-        .map_err(|_| AppError::SummarizationFailed)?;
-    body.choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
+    let content = match provider {
+        Provider::OpenAiCompatible => {
+            let body: ChatCompletionResponse = resp
+                .json()
+                .await
+                .map_err(|_| AppError::SummarizationFailed)?;
+            body.choices.into_iter().next().and_then(|c| c.message.content)
+        }
+        Provider::Anthropic | Provider::Google => {
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|_| AppError::SummarizationFailed)?;
+            if provider == Provider::Anthropic {
+                parse_anthropic_response(&body).content
+            } else {
+                parse_google_response(&body).content
+            }
+        }
+    };
+    content
         .map(|s| strip_think(&s))
         .filter(|s| !s.is_empty())
         .ok_or(AppError::SummarizationFailed)
@@ -1002,13 +1177,20 @@ async fn run_stream(
     app: &AppHandle,
     run_id: &str,
     cancel: &Arc<AtomicBool>,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     project_path: String,
     model: Option<String>,
 ) -> Result<(), String> {
     if project_path.trim().is_empty() {
         return Err("No project open — runtime config unavailable".into());
     }
+    // Validate before any provider request (same gate as the non-streamed paths).
+    let (messages, removed) = validator::sanitize_typed(&messages);
+    validator::log_removals(&removed);
+    if !messages.iter().any(|m| m.role != "system") {
+        return Err(validator::EMPTY_CONVERSATION.to_string());
+    }
+    let mut messages = messages;
     let cfg = load_from_disk(&project_path)
         .await
         .map_err(|e| format!("{e:?}"))?;
@@ -1045,27 +1227,53 @@ async fn run_stream(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut req = client
-        .post(format!(
-            "{}/chat/completions",
-            runtime.base_url.trim_end_matches('/')
-        ))
-        .json(&ChatStreamRequest {
-            model: &model_id,
-            messages: &messages,
-            stream: true,
-            temperature,
-            top_p,
-        });
-    if let Some(key) = runtime.api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
+    use crate::commands::providers::{
+        anthropic_request, chat_url, google_chat_url, google_request, parse_anthropic_sse,
+        parse_google_sse, resolve_provider, Provider, StreamDelta,
+    };
+    let provider = resolve_provider(runtime.provider.as_deref(), &runtime.base_url);
+    let req = match provider {
+        Provider::OpenAiCompatible => client
+            .post(chat_url(provider, &runtime.base_url))
+            .json(&ChatStreamRequest {
+                model: &model_id,
+                messages: &messages,
+                stream: true,
+                temperature,
+                top_p,
+            }),
+        Provider::Anthropic => {
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(chat_url(provider, &runtime.base_url))
+                .json(&anthropic_request(&model_id, &msgs, None, true, temperature, top_p))
         }
-    }
+        Provider::Google => {
+            let msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            client
+                .post(google_chat_url(&runtime.base_url, &model_id, true))
+                .json(&google_request(&msgs, None, temperature, top_p))
+        }
+    };
+    let req = apply_provider_auth(req, provider, runtime.api_key.as_deref());
 
     let resp = req.send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        // Include the provider's own message so the frontend can surface an
+        // API error (key, rate limit, bad request) instead of "runtime offline".
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            crate::commands::providers::provider_error_message(&body)
+        ));
     }
 
     let mut stream = resp.bytes_stream();
@@ -1094,6 +1302,40 @@ async fn run_stream(
             let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
+            // Anthropic streams typed events (`content_block_delta`), Gemini
+            // streams whole response chunks — neither is OpenAI's
+            // choices[].delta. Translate onto the same chunk events and move on.
+            if provider != Provider::OpenAiCompatible {
+                let delta = if provider == Provider::Anthropic {
+                    parse_anthropic_sse(&json)
+                } else {
+                    parse_google_sse(&json)
+                };
+                match delta {
+                    Some(StreamDelta::Text(text)) => {
+                        let _ = app.emit(
+                            EVT_LLM_CHUNK,
+                            ChunkPayload {
+                                run_id: run_id.to_string(),
+                                text,
+                                thinking: None,
+                            },
+                        );
+                    }
+                    Some(StreamDelta::Thinking(thinking)) => {
+                        let _ = app.emit(
+                            EVT_LLM_CHUNK,
+                            ChunkPayload {
+                                run_id: run_id.to_string(),
+                                text: String::new(),
+                                thinking: Some(thinking),
+                            },
+                        );
+                    }
+                    None => {}
+                }
+                continue;
+            }
             let delta = &json["choices"][0]["delta"];
             // Runtimes with native thinking support (Ollama's `reasoning`,
             // DeepSeek-style `reasoning_content`) stream reasoning as its own

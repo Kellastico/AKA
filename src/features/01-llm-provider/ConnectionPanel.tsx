@@ -625,9 +625,12 @@ function EndpointForm({
         className="w-full rounded-lg border border-white/15 bg-black/30 px-2 py-1.5 text-xs text-white outline-none placeholder:text-white/30 focus:border-white/40"
       />
       <p className="px-0.5 text-[10px] leading-relaxed text-white/40">
-        OpenAI-compatible endpoints only (uses <code>/chat/completions</code> +
-        Bearer auth). For Claude, Gemini, etc., point at a gateway like OpenRouter
-        — a raw Anthropic/Google API key won't work here.
+        Works with any OpenAI-compatible endpoint — and with{" "}
+        <span className="text-white/60">Anthropic</span> (
+        <code>https://api.anthropic.com</code> + <code>sk-ant-…</code>) and{" "}
+        <span className="text-white/60">Google Gemini</span> (
+        <code>https://generativelanguage.googleapis.com</code> + your API key)
+        directly. The protocol is detected from the URL.
       </p>
       {error ? <div className="text-[11px] text-red-300">{error}</div> : null}
       <div className="flex justify-end gap-2 pt-1">

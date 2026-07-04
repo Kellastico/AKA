@@ -19,6 +19,19 @@ export type AppError =
   | { kind: "ConfigCorrupted"; reason: string }
   | { kind: "SummarizationFailed" }
   /**
+   * The provider endpoint answered with a non-2xx status — an API error
+   * (invalid request, bad key, rate limit, provider-side failure). Distinct
+   * from RuntimeOffline (endpoint unreachable) and from agent/reasoning
+   * failures (AgentCrash, loop stop reasons). `message` is the provider's
+   * own error text.
+   */
+  | { kind: "ProviderRejected"; status: number; message: string }
+  /**
+   * The backend MessageValidator removed every user/assistant message before
+   * the provider request — there was nothing valid to send.
+   */
+  | { kind: "InvalidConversation"; reason: string }
+  /**
    * Synthesized client-side when the Rust binary returns a transport-level
    * failure that isn't covered by the real AppError variants — most commonly
    * "Command X not found" when the running binary predates a new command.
@@ -38,6 +51,8 @@ export function asAppError(err: unknown): AppError {
       case "SandboxViolation":
       case "ConfigCorrupted":
       case "SummarizationFailed":
+      case "ProviderRejected":
+      case "InvalidConversation":
       case "BackendUnavailable":
         return err as AppError;
     }
@@ -171,6 +186,13 @@ export type RuntimeBlock = {
   top_p?: number | null;
   /** Explicit vision-capability override; null = auto-detect from model id. */
   vision?: boolean | null;
+  /**
+   * Wire protocol: "openai" (default), "anthropic", or "google". null =
+   * auto-detect from the base URL host (anthropic.com → Anthropic,
+   * googleapis.com → Gemini, everything else OpenAI-compatible), so pasting a
+   * raw provider endpoint + key just works.
+   */
+  provider?: string | null;
 };
 
 export type AgentBlock = {
@@ -343,6 +365,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     temperature: null,
     top_p: null,
     vision: null,
+    provider: null,
   },
   agent: {
     name: "",

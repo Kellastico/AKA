@@ -101,7 +101,10 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             folder: Capability::Search,
             kind: ToolKind::Passthrough,
             shim: true,
-            native: false,
+            // Also exposed to the built-in loop: Strategize gives the model
+            // read + diagnose. Execution shells out to the user-configured
+            // diagnostics_cmd — House-trusted, read-only by effect.
+            native: true,
         },
         ToolSpec {
             name: "read_file",

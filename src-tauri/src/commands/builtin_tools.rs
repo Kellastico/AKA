@@ -328,6 +328,51 @@ pub async fn execute_builtin_tool(
             }
             Ok(search_files(&root, &project_path, &query))
         }
+        "diagnostics" => {
+            // Runs the user-configured typecheck/lint (`agent.diagnostics_cmd`)
+            // — the same command the `aka-tool` shim runs for external agents.
+            // House-trusted exec of a user-chosen command; read-only by effect,
+            // hence available at the read-only floor (folder: search).
+            let cmd = crate::commands::project_config::load_from_disk(&project_path)
+                .await
+                .map(|c| c.agent.diagnostics_cmd.trim().to_string())
+                .unwrap_or_default();
+            if cmd.is_empty() {
+                return Ok(ToolResult::err(
+                    "No diagnostics command configured (set agent.diagnostics_cmd in .äkä/config.json).",
+                ));
+            }
+            let output = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&project_path)
+                .output()
+                .await;
+            match output {
+                Ok(o) => {
+                    let mut text = String::new();
+                    text.push_str(&String::from_utf8_lossy(&o.stdout));
+                    if !o.stderr.is_empty() {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&String::from_utf8_lossy(&o.stderr));
+                    }
+                    if text.len() > MAX_READ_BYTES {
+                        text.truncate(MAX_READ_BYTES);
+                        text.push_str("\n…[truncated]");
+                    }
+                    let code = o.status.code().unwrap_or(-1);
+                    if text.trim().is_empty() {
+                        text = format!("(no output — exit {code})");
+                    }
+                    // Diagnostics FINDING issues is a successful tool run; the
+                    // exit code is part of the payload, not a tool failure.
+                    Ok(ToolResult::ok(format!("[exit {code}]\n{text}")))
+                }
+                Err(e) => Ok(ToolResult::err(format!("Could not run diagnostics: {e}"))),
+            }
+        }
         // fs_write tools are advertised here (so the model sees them at the Write
         // phase), but they EXECUTE through AKA's dedicated enforced commands —
         // `apply_str_replace` / `apply_diff` / `delete_file` — which bake in

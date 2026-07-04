@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { load } from "@tauri-apps/plugin-store";
-import { useMessagesStore } from "./use-messages-store";
+import { useMessagesStore, type ToolKind } from "./use-messages-store";
+import {
+  projectContextBlock,
+  runNativeToolLoop,
+  runTextToolLoop,
+} from "../lib/builtin-loop";
 import { useAgentsStore } from "./use-agents-store";
 import { useAttachmentsStore } from "./use-attachments-store";
 import { useProjectConfigStore } from "./use-project-config-store";
@@ -17,7 +22,11 @@ import { parserForAgent } from "../lib/agent-parsers";
 import {
   abortRuntime,
   asAppError,
+  builtinToolDefs,
+  callLlm,
   callLlmStream,
+  callLlmTools,
+  executeBuiltinTool,
   listDir,
   readImageBase64,
   readTextFile,
@@ -191,15 +200,33 @@ function inferLlmError(raw: string): AppError {
     return { kind: "BackendUnavailable", reason: raw };
   }
 
-  // Network / runtime issues.
+  // The backend MessageValidator refused to send (streaming path surfaces it
+  // as a plain string) — nothing valid was left after sanitization.
+  if (m.includes("no valid user or assistant messages")) {
+    return { kind: "InvalidConversation", reason: raw };
+  }
+
+  // The endpoint answered with an HTTP error — an API rejection, not
+  // connectivity. The streaming path formats these as "HTTP <status>: <provider
+  // message>"; surface them as ProviderRejected so the banner can distinguish
+  // key / rate-limit / bad-request / provider-5xx from "runtime offline".
+  const http = raw.match(/\bHTTP (\d{3})\b:?\s*([\s\S]*)/i);
+  if (http) {
+    return {
+      kind: "ProviderRejected",
+      status: Number(http[1]),
+      message: (http[2] ?? "").trim(),
+    };
+  }
+
+  // Network / runtime issues — nothing answered at all.
   if (
     m.includes("connection") ||
     m.includes("connect") ||
     m.includes("offline") ||
     m.includes("dns") ||
     m.includes("timed out") ||
-    m.includes("refused") ||
-    m.includes("http 5")
+    m.includes("refused")
   ) {
     return { kind: "RuntimeOffline" };
   }
@@ -485,7 +512,7 @@ export type ChatMode = "ask" | "edit" | "agent";
 
 export const CHAT_MODES: { id: ChatMode; label: string; hint: string }[] = [
   { id: "ask", label: "Chat Only", hint: "Pure conversation — nothing touches your repo" },
-  { id: "edit", label: "Strategize", hint: "LLM plans the work and shows diffs for your approval" },
+  { id: "edit", label: "Strategize", hint: "Read-only tools — the model explores your project and plans; nothing is changed" },
   { id: "agent", label: "Execute", hint: "Dispatch the agent to run the task end-to-end" },
 ];
 
@@ -580,6 +607,19 @@ type ChatState = {
 };
 
 const KNOWN_MODES: ChatMode[] = ["ask", "edit", "agent"];
+
+/**
+ * System prompt for the Strategize (read-only) built-in loop. Honest about the
+ * boundary: the model can inspect the project but cannot change it, so its
+ * deliverable is understanding + a plan, never a claimed edit.
+ */
+const STRATEGIZE_SYSTEM = [
+  "You are a coding strategist working inside the user's project.",
+  "You have READ-ONLY tools: you can read files, list directories, search, and run the project's diagnostics.",
+  "You CANNOT write files, run arbitrary commands, or change anything — do not claim to have made changes.",
+  "Use the tools to actually look at the code before answering. Ground every claim in what you read.",
+  "Deliver: a clear explanation and, when asked for work, a concrete step-by-step plan the user (or an agent) can execute.",
+].join("\n");
 
 export const useChatStore = create<ChatState>((set, get) => ({
   // First-time users land in Ask mode — a real LLM conversation. Agent mode
@@ -1483,6 +1523,197 @@ export const useChatStore = create<ChatState>((set, get) => ({
           detach();
           cancelledRuns.delete(runKey);
           clearRun();
+        }
+      })();
+      return;
+    }
+
+    if (mode === "edit" && agent && !agent.bin.trim()) {
+      // Strategize + None: AKA drives the model itself through the built-in
+      // READ-ONLY tool loop (read/list/search/diagnostics — phase-gated, so no
+      // write or exec tool is even advertised). Native tool-calling when the
+      // model supports it, the @@aka text protocol otherwise. Tool activity
+      // renders as the same timeline cards an agent run produces.
+      void (async () => {
+        const attachmentCtx = await resolveAttachments();
+        if (genOf(runKey) !== myGen) return;
+        const cfg = useProjectConfigStore.getState().config;
+        const task = buildTaskEnvelope({
+          task: text,
+          template: cfg?.task_template,
+          attachments,
+          attachmentContext: attachmentCtx,
+          verifyCmd: cfg?.agent.verify_cmd,
+          visionModel: resolveVision(modelId, cfg?.runtime.vision),
+        });
+
+        const placeholderId = useMessagesStore.getState().add(
+          {
+            role: "assistant",
+            content: "",
+            modelId: modelId || undefined,
+            agentId,
+            pendingSince: Date.now(),
+          },
+          ownerSessionId,
+        );
+        setPlaceholder(placeholderId);
+
+        // Stop() bumps this session's generation; the wrapper aborts the loop
+        // at the next turn/tool boundary when that happens.
+        const controller = new AbortController();
+        const bailIfStale = () => {
+          if (genOf(runKey) !== myGen) controller.abort();
+        };
+
+        // Timeline hooks — the same message shapes the agent path emits, so
+        // the run timeline renders identically (flat + chronological).
+        let currentToolId: string | null = null;
+        const store = () => useMessagesStore.getState();
+        const kindOf = (name: string): ToolKind =>
+          name === "read_file" ? "read" : name === "diagnostics" ? "run" : "search";
+        const hooks = {
+          onReasoning: (textChunk: string) => {
+            if (genOf(runKey) !== myGen) return;
+            store().add(
+              {
+                role: "reasoning",
+                content: "",
+                thinkingContent: textChunk,
+                thinkingStartedAt: Date.now(),
+                thinkingEndedAt: Date.now(),
+                modelId: modelId || undefined,
+                agentId,
+              },
+              ownerSessionId,
+            );
+          },
+          onToolStart: (call: { name: string; argumentsJson: string }) => {
+            if (genOf(runKey) !== myGen) return;
+            let path: string | undefined;
+            try {
+              const args = JSON.parse(call.argumentsJson) as { path?: string; query?: string };
+              path = args.path;
+              if (!path && args.query) path = `"${args.query}"`;
+            } catch {
+              /* unparseable args — card still renders by name */
+            }
+            // First visible activity — drop the Thinking indicator.
+            if (
+              ownerMessages().find((m) => m.id === placeholderId)?.pendingSince !==
+              undefined
+            ) {
+              store().patchMessage(placeholderId, { pendingSince: undefined }, ownerSessionId);
+            }
+            currentToolId = store().addBefore(
+              placeholderId,
+              {
+                role: "tool",
+                content: "",
+                toolKind: kindOf(call.name),
+                toolName: call.name,
+                toolPath: path,
+                toolStatus: "running",
+                toolStartedAt: Date.now(),
+                agentId,
+                modelId: modelId || undefined,
+              },
+              ownerSessionId,
+            );
+          },
+          onToolEnd: (result: { name: string; ok: boolean; content: string }) => {
+            if (genOf(runKey) !== myGen || !currentToolId) return;
+            const started = ownerMessages().find((m) => m.id === currentToolId)?.toolStartedAt;
+            store().patchMessage(
+              currentToolId,
+              {
+                toolStatus: result.ok ? "done" : "failed",
+                toolElapsedMs: started !== undefined ? Date.now() - started : undefined,
+                toolPreview: result.content.slice(0, 200),
+              },
+              ownerSessionId,
+            );
+            currentToolId = null;
+          },
+        };
+
+        try {
+          const tools = await builtinToolDefs("readonly");
+          const native = classifyModel(modelId).nativeToolCalling;
+          const executeTool = async (name: string, argumentsJson: string) => {
+            bailIfStale();
+            return executeBuiltinTool(name, argumentsJson, projectPath, "readonly");
+          };
+
+          // Ground the model in the project BEFORE the first turn: name, root,
+          // and a top-level listing (fetched through the same enforced list_dir
+          // tool it uses) — otherwise the model starts blind, not knowing which
+          // project it's in or what files exist. Best-effort: a listing failure
+          // degrades to the identity line, never blocks the run.
+          let listing: string | null = null;
+          try {
+            const rootList = await executeBuiltinTool("list_dir", "{}", projectPath, "readonly");
+            if (rootList.ok) listing = rootList.content;
+          } catch {
+            /* identity line still grounds the model */
+          }
+          const system = `${STRATEGIZE_SYSTEM}\n\n${projectContextBlock(projectPath, listing)}`;
+
+          const result = native
+            ? await runNativeToolLoop({
+                system,
+                task,
+                tools,
+                modelTurn: async (messages) => {
+                  bailIfStale();
+                  return callLlmTools(messages, tools, projectPath, modelId);
+                },
+                executeTool,
+                hooks,
+                signal: controller.signal,
+              })
+            : await runTextToolLoop({
+                system,
+                task,
+                tools,
+                textTurn: async (messages) => {
+                  bailIfStale();
+                  return callLlm(messages, projectPath, modelId);
+                },
+                executeTool,
+                hooks,
+                signal: controller.signal,
+              });
+
+          if (genOf(runKey) !== myGen) return;
+          const finalText =
+            result.finalText ??
+            (result.stopReason === "budget"
+              ? "[stopped — step budget reached before the model finished. Try narrowing the task.]"
+              : result.stopReason === "aborted"
+                ? ""
+                : "[the model produced no answer]");
+          if (finalText) {
+            store().patchMessage(
+              placeholderId,
+              { content: finalText, pendingSince: undefined },
+              ownerSessionId,
+            );
+          }
+        } catch (err) {
+          if (genOf(runKey) !== myGen) return;
+          store().patchMessage(
+            placeholderId,
+            { error: asAppError(err), pendingSince: undefined },
+            ownerSessionId,
+          );
+        } finally {
+          if (genOf(runKey) === myGen) {
+            finalizePlaceholder(placeholderId, "abandoned", ownerSessionId);
+            useMessagesStore.getState().closeRunningTools(ownerSessionId);
+            clearPlaceholderIf(placeholderId);
+            clearRun();
+          }
         }
       })();
       return;

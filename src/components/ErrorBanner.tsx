@@ -148,6 +148,33 @@ export function ErrorBanner({
         </Frame>
       );
 
+    case "ProviderRejected":
+      // API error — the endpoint is up and answered; it refused the request.
+      // Deliberately distinct from RuntimeOffline ("start your server") and
+      // from agent/reasoning failures (AgentCrash, loop stop reasons).
+      return (
+        <Frame tone="error">
+          <Body
+            title={`API error — the provider rejected the request (HTTP ${error.status}).`}
+            detail={`${providerHint(error.status)} This came from the LLM API itself, not from the agent or its reasoning.`}
+          />
+          {error.message.trim().length > 0 && (
+            <StderrBlock stderr={error.message} label="provider response" />
+          )}
+          {onRetry && <RetryButton onClick={onRetry} />}
+        </Frame>
+      );
+
+    case "InvalidConversation":
+      return (
+        <Frame tone="warning">
+          <Body
+            title="Nothing valid to send to the model."
+            detail={`${error.reason} The request was stopped before reaching the provider — try sending a new message.`}
+          />
+        </Frame>
+      );
+
     case "BackendUnavailable":
       return (
         <Frame tone="error">
@@ -187,6 +214,22 @@ function Frame({
       </div>
     </div>
   );
+}
+
+/**
+ * One-line action hint per HTTP status class for `ProviderRejected`. The goal
+ * is triage: is this my key, my plan, my request, or the provider's problem?
+ */
+function providerHint(status: number): string {
+  if (status === 401 || status === 403)
+    return "The provider rejected your API key — check the key saved for this endpoint.";
+  if (status === 404)
+    return "Model or endpoint not found — check the model id and base URL.";
+  if (status === 429)
+    return "Rate limited or out of credits — wait a moment, or check your plan and billing.";
+  if (status >= 500)
+    return "The provider had an internal error — usually transient, retry in a moment.";
+  return "The provider couldn't process this request — often an unsupported parameter, an over-long context, or a model-specific limit.";
 }
 
 function Body({ title, detail }: { title: string; detail?: string }) {
@@ -266,7 +309,13 @@ function HumanizedAndFix({ stderr }: { stderr: string }) {
   );
 }
 
-function StderrBlock({ stderr }: { stderr: string }) {
+function StderrBlock({
+  stderr,
+  label = "stderr (last lines)",
+}: {
+  stderr: string;
+  label?: string;
+}) {
   const [open, setOpen] = useState(true);
   const Caret = open ? CaretDown : CaretRight;
   return (
@@ -277,7 +326,7 @@ function StderrBlock({ stderr }: { stderr: string }) {
         className="inline-flex items-center gap-1.5 self-start text-[11px] text-white/60 hover:text-white"
       >
         <Caret size={11} weight="bold" />
-        stderr (last lines)
+        {label}
       </button>
       <Collapse open={open}>
         {/* break-all (not break-words) so long unbreakable strings — file

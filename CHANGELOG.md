@@ -3,6 +3,35 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.4.2
+
+### Added
+- **Strategize runs a real read-only tool loop.** None (Agent picker) +
+  Strategize drives the model through AKA's built-in loop: `read_file`,
+  `list_dir`, `search_files`, and the project's `diagnostics` — grounded in the
+  project's name/root/top-level layout from the first turn, every call a live
+  timeline card. Native tool-calling when the model supports it, a compact
+  `@@aka {"call":…}` text protocol otherwise. Read-only by construction: no
+  write/exec tool is advertised or executable in this mode. Stop works
+  mid-loop; a step budget stops runaway loops.
+- **Native Anthropic + Google Gemini support.** The Add-custom-endpoint box
+  auto-detects the protocol from the URL: `api.anthropic.com` + `sk-ant-…` or
+  `generativelanguage.googleapis.com` + an API key now work directly — chat,
+  streaming (incl. thinking deltas), the Strategize tool loop, model listing,
+  and health, all through each provider's native API. Explicit override via
+  `runtime.provider` ("openai" | "anthropic" | "google").
+
+### Fixed
+- **API errors are no longer misread as "runtime offline".** A non-2xx answer
+  from a provider (bad key, rate limit, out of credits) surfaces as an API
+  error carrying the provider's own message; "runtime offline" now means
+  unreachable only.
+- **Conversations are sanitized before every provider call.** A centralized
+  message validator drops empty/malformed messages and preserves tool-call
+  pairing, preventing a class of confusing 400s.
+- **Strategize knows which project it's in** — the model is grounded in the
+  project's identity and structure before its first turn.
+
 ## 1.4.1
 
 ### Added

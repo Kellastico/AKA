@@ -57,6 +57,12 @@ pub struct RuntimeBlock {
     /// from the model id; `Some(true/false)` forces the answer.
     #[serde(default)]
     pub vision: Option<bool>,
+    /// Which wire protocol this runtime speaks: `"openai"` (default) or
+    /// `"anthropic"`. `None` = auto-detect from the base URL host (an
+    /// `anthropic.com` endpoint speaks Anthropic; everything else is
+    /// OpenAI-compatible), so existing configs keep working untouched.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 impl Default for RuntimeBlock {
@@ -69,6 +75,7 @@ impl Default for RuntimeBlock {
             temperature: None,
             top_p: None,
             vision: None,
+            provider: None,
         }
     }
 }

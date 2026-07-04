@@ -118,6 +118,10 @@ export function formatErrorForLog(error: AppError): string {
       return `[${ts}] ERROR: config corrupted: ${error.reason}`;
     case "SummarizationFailed":
       return `[${ts}] WARN: session summary failed — starting fresh`;
+    case "ProviderRejected":
+      return `[${ts}] ERROR: API error — provider rejected request (HTTP ${error.status}): ${error.message}`;
+    case "InvalidConversation":
+      return `[${ts}] WARN: no valid messages to send: ${error.reason}`;
     case "BackendUnavailable":
       return `[${ts}] ERROR: backend command unavailable: ${error.reason}`;
   }

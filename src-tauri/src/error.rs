@@ -51,6 +51,21 @@ pub enum AppError {
 
     /// `summarize_session` timed out, errored, or produced an empty body.
     SummarizationFailed,
+
+    /// The provider endpoint answered with a non-2xx status — an **API error**
+    /// (invalid request, bad key, rate limit, provider-side failure). Distinct
+    /// from `RuntimeOffline` (endpoint unreachable) and from agent/reasoning
+    /// failures (`AgentCrash`, loop stop reasons): the runtime is up, the
+    /// request reached it, and it said no. `message` is the provider's own
+    /// error text, extracted from the response body.
+    #[serde(rename_all = "camelCase")]
+    ProviderRejected { status: u16, message: String },
+
+    /// The MessageValidator removed every user/assistant message, so there was
+    /// nothing valid to send. The request is refused client-side instead of
+    /// letting a provider return "invalid message provided at index X".
+    #[serde(rename_all = "camelCase")]
+    InvalidConversation { reason: String },
 }
 
 impl AppError {
@@ -73,6 +88,19 @@ impl AppError {
     pub fn network_blocked(url: impl Into<String>) -> Self {
         Self::NetworkBlocked { url: url.into() }
     }
+
+    pub fn provider_rejected(status: u16, message: impl Into<String>) -> Self {
+        Self::ProviderRejected {
+            status,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_conversation() -> Self {
+        Self::InvalidConversation {
+            reason: crate::commands::message_validator::EMPTY_CONVERSATION.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for AppError {
@@ -89,6 +117,12 @@ impl std::fmt::Display for AppError {
             Self::EditConflict { reason } => write!(f, "edit conflict: {reason}"),
             Self::NetworkBlocked { url } => write!(f, "network egress blocked: {url}"),
             Self::SummarizationFailed => write!(f, "summarization failed"),
+            Self::ProviderRejected { status, message } => {
+                write!(f, "provider rejected request (HTTP {status}): {message}")
+            }
+            Self::InvalidConversation { reason } => {
+                write!(f, "invalid conversation: {reason}")
+            }
         }
     }
 }
