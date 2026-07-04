@@ -3,6 +3,7 @@ import { normalizeControl } from "./noise";
 import { createSmallCodeParser } from "./smallcode";
 import { createReActParser } from "./react";
 import { createProtocolParser, isAkaMarker } from "./protocol";
+import { createReActExtrasParser, isReActExtra } from "./extras";
 
 /**
  * Route each line to `primary` when `routeToPrimary(line)` is true, else to
@@ -52,11 +53,16 @@ function baseParserForAgent(bin: string | null | undefined): AgentParser {
  * native output is still parsed as before.
  */
 export function parserForAgent(bin: string | null | undefined): AgentParser {
-  return composeParsers(
-    createProtocolParser(),
+  // Chain, outermost first: `@@aka` markers → the native protocol; else common
+  // non-native patterns (`<tool_call …>`, provider-error dumps) → the extras
+  // recognizer; else the agent's own base parser. Each layer is dormant unless
+  // it sees its pattern, so a plain agent is unaffected.
+  const withExtras = composeParsers(
+    createReActExtrasParser(),
     baseParserForAgent(bin),
-    isAkaMarker,
+    isReActExtra,
   );
+  return composeParsers(createProtocolParser(), withExtras, isAkaMarker);
 }
 
 export type { AgentEvent, AgentParser } from "./types";

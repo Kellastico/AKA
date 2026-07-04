@@ -58,7 +58,7 @@ export function isReActLine(line: string): boolean {
 }
 
 /** Map a tool name to AKA's broad ToolKind for colour-coding. */
-function kindForToolName(name: string): ToolKind {
+export function kindForToolName(name: string): ToolKind {
   const n = name.toLowerCase();
   if (/(search|find|grep|list|glob|ls|locate)/.test(n)) return "search";
   if (/(write|edit|patch|create|append|insert|replace|modify|save)/.test(n))
@@ -71,7 +71,7 @@ function kindForToolName(name: string): ToolKind {
 const PATH_KEYS = ["path", "file", "file_path", "filename", "filepath", "dir"];
 
 /** Best-effort path extraction from an Action Input string (usually JSON). */
-function pathFromInput(input: string): string | undefined {
+export function pathFromInput(input: string): string | undefined {
   const trimmed = input.trim();
   if (trimmed.startsWith("{")) {
     try {
