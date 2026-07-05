@@ -3,6 +3,29 @@
 All notable changes to AKA are documented here. Versions follow the app
 version stamped in `src-tauri/tauri.conf.json`.
 
+## 1.4.3
+
+### Changed
+- **`read_file` is paged for small contexts.** Tool results are capped at
+  ~24 KB (was 100 KB — enough to blow an 8k-context local model in one call);
+  `read_file` takes `offset`/`limit` and the truncation marker says exactly how
+  to continue, so small models page and frontier models lose nothing.
+  Diagnostics output is capped to the same size.
+- **The context meter is accurate during Strategize.** The built-in loop
+  reports its real serialized prompt size (tool results included) before every
+  model turn, instead of the meter showing only the visible transcript.
+- **Egress consent is honored where it's given.** Adding or editing a remote
+  endpoint (URL + key) opens the network gate for exactly that host — the
+  explicit consent moment — instead of blocking the first chat with a
+  "go edit Capabilities" toast. Endpoints already stored in a project's config
+  are honored on load. Everything else stays deny-by-default.
+
+### Fixed
+- **Removed the `vite.config.js` shadow trap.** A stale compiled copy was
+  tracked in the repo and silently shadowed `vite.config.ts` (Vite resolves
+  `.js` first). Deleted, gitignored, and TypeScript build artifacts now emit
+  into the cache instead of the project root.
+
 ## 1.4.2
 
 ### Added

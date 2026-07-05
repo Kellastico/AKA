@@ -30,9 +30,12 @@ use crate::sandbox::SandboxState;
 use crate::tools::catalog;
 use crate::tools::policy::{check, Action};
 
-/// Max bytes of a file fed back to the model, so one `read_file` can't blow the
-/// context window. Larger files are truncated with an explicit marker.
-const MAX_READ_BYTES: usize = 100_000;
+/// Max bytes of one tool result fed back to the model. Sized for LIMITED
+/// hardware: ~24 KB ≈ 6k tokens, so even an 8k-context local model survives a
+/// worst-case read with room to answer. Bigger files are paged, not dumped —
+/// `read_file` takes `offset`/`limit` and the truncation marker tells the model
+/// exactly how to continue, so frontier models lose nothing (they just page).
+const MAX_TOOL_BYTES: usize = 24_000;
 /// Cap on entries returned by `list_dir` / matches by `search_files`.
 const MAX_ENTRIES: usize = 400;
 /// Cap on files scanned by a single `search_files` call (keeps it bounded).
@@ -79,7 +82,16 @@ fn phase_for_folder(folder: catalog::Capability) -> ToolPhase {
 /// by name. Kept host-side (the shared catalog stays schema-free + shim-safe).
 fn schema_for(name: &str) -> serde_json::Value {
     match name {
-        "read_file" | "delete_file" => serde_json::json!({
+        "read_file" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Project-relative path." },
+                "offset": { "type": "integer", "description": "1-based line to start from (for paging big files)." },
+                "limit": { "type": "integer", "description": "Max lines to return." }
+            },
+            "required": ["path"]
+        }),
+        "delete_file" => serde_json::json!({
             "type": "object",
             "properties": { "path": { "type": "string", "description": "Project-relative path." } },
             "required": ["path"]
@@ -223,6 +235,48 @@ fn arg_str(args: &serde_json::Value, key: &str) -> Option<String> {
     args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
+fn arg_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
+    args.get(key).and_then(|v| v.as_u64())
+}
+
+/// Page a file's content for the model: start at 1-based line `offset`, return at
+/// most `limit` lines, and never exceed [`MAX_TOOL_BYTES`] — whichever bound hits
+/// first. When anything was left out, the marker tells the model EXACTLY how to
+/// continue (`offset=<next line>`), so a small model pages instead of drowning
+/// and a frontier model loses nothing. Pure — directly unit-testable.
+fn paged_read(content: &str, offset: Option<u64>, limit: Option<u64>) -> ToolResult {
+    let total_lines = content.lines().count();
+    let start = offset.unwrap_or(1).max(1) as usize; // 1-based
+    if total_lines > 0 && start > total_lines {
+        return ToolResult::err(format!(
+            "offset {start} is past the end of the file ({total_lines} lines)."
+        ));
+    }
+    let max_lines = limit.map(|l| l.max(1) as usize).unwrap_or(usize::MAX);
+
+    let mut out = String::new();
+    let mut last_included = start.saturating_sub(1); // last 1-based line included
+    for (i, line) in content.lines().enumerate().skip(start - 1) {
+        let taken = (i + 1) - (start - 1);
+        if taken > max_lines || out.len() + line.len() + 1 > MAX_TOOL_BYTES {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        last_included = i + 1;
+    }
+
+    // One rule: whenever lines remain past what we returned — cap, limit, or
+    // both — say exactly how to get the rest.
+    if last_included < total_lines {
+        out.push_str(&format!(
+            "…[showing lines {start}–{last_included} of {total_lines} — call read_file again with offset={} to continue]",
+            last_included + 1
+        ));
+    }
+    ToolResult::ok(out)
+}
+
 /// Execute one model-chosen tool call — the single policy-enforced chokepoint for
 /// the built-in loop. Parses the raw JSON `arguments`, enforces the phase + the
 /// folder's deny-by-default policy, then runs the read-only action. Never errors
@@ -278,13 +332,12 @@ pub async fn execute_builtin_tool(
             }
             match tokio::fs::read(&path).await {
                 Ok(bytes) => {
-                    let truncated = bytes.len() > MAX_READ_BYTES;
-                    let slice = &bytes[..bytes.len().min(MAX_READ_BYTES)];
-                    let mut text = String::from_utf8_lossy(slice).into_owned();
-                    if truncated {
-                        text.push_str("\n…[truncated]");
-                    }
-                    Ok(ToolResult::ok(text))
+                    let content = String::from_utf8_lossy(&bytes);
+                    Ok(paged_read(
+                        &content,
+                        arg_u64(&args, "offset"),
+                        arg_u64(&args, "limit"),
+                    ))
                 }
                 Err(e) => Ok(ToolResult::err(format!("Could not read '{rel}': {e}"))),
             }
@@ -358,8 +411,8 @@ pub async fn execute_builtin_tool(
                         }
                         text.push_str(&String::from_utf8_lossy(&o.stderr));
                     }
-                    if text.len() > MAX_READ_BYTES {
-                        text.truncate(MAX_READ_BYTES);
+                    if text.len() > MAX_TOOL_BYTES {
+                        text.truncate(MAX_TOOL_BYTES);
                         text.push_str("\n…[truncated]");
                     }
                     let code = o.status.code().unwrap_or(-1);
@@ -517,6 +570,44 @@ mod tests {
         assert_eq!(arg_str(&v, "path").as_deref(), Some("x"));
         assert_eq!(arg_str(&v, "n"), None);
         assert_eq!(arg_str(&v, "missing"), None);
+    }
+
+    #[test]
+    fn paged_read_returns_whole_small_file_unmarked() {
+        let res = paged_read("a\nb\nc\n", None, None);
+        assert!(res.ok);
+        assert_eq!(res.content, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn paged_read_pages_by_offset_and_limit_with_continuation_hint() {
+        let content = "l1\nl2\nl3\nl4\nl5\n";
+        let res = paged_read(content, Some(2), Some(2));
+        assert!(res.ok);
+        assert!(res.content.starts_with("l2\nl3\n"));
+        // The marker tells the model exactly how to continue.
+        assert!(res.content.contains("showing lines 2–3 of 5"));
+        assert!(res.content.contains("offset=4"));
+        // Reading the tail cleanly ends without a marker.
+        let tail = paged_read(content, Some(4), None);
+        assert_eq!(tail.content, "l4\nl5\n");
+    }
+
+    #[test]
+    fn paged_read_enforces_the_byte_cap_for_small_contexts() {
+        // A "file" bigger than the cap: one long line per row.
+        let big: String = (0..2_000).map(|i| format!("{i}{}\n", "x".repeat(40))).collect();
+        let res = paged_read(&big, None, None);
+        assert!(res.ok);
+        assert!(res.content.len() <= MAX_TOOL_BYTES + 200, "cap holds (+marker)");
+        assert!(res.content.contains("call read_file again with offset="));
+    }
+
+    #[test]
+    fn paged_read_rejects_past_end_offset() {
+        let res = paged_read("only\n", Some(10), None);
+        assert!(!res.ok);
+        assert!(res.content.contains("past the end"));
     }
 
     #[test]

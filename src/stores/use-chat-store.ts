@@ -1573,6 +1573,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const kindOf = (name: string): ToolKind =>
           name === "read_file" ? "read" : name === "diagnostics" ? "run" : "search";
         const hooks = {
+          // Keep the context meter honest during the loop: the real prompt
+          // (tool results included) is invisible to the transcript estimate,
+          // so the loop reports its serialized size before every model turn.
+          // contextWindow 0 = fall back to the selected model's known limit.
+          onUsage: (estimatedTokens: number) => {
+            if (genOf(runKey) !== myGen) return;
+            useTokenCounterStore.getState().setAgentContext(estimatedTokens, 0);
+          },
           onReasoning: (textChunk: string) => {
             if (genOf(runKey) !== myGen) return;
             store().add(

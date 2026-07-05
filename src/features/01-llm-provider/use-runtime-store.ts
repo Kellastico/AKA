@@ -115,6 +115,32 @@ function labelForUrl(baseUrl: string): string {
   }
 }
 
+/**
+ * Align the egress gate with explicit user consent: typing a remote endpoint's
+ * URL + key into AKA IS the informed-consent moment, so its host joins the
+ * project's `network_allowlist` right then — instead of the first chat being
+ * blocked with a "go edit Capabilities" detour. Deny-by-default is untouched
+ * for every host the user did NOT add. Loopback needs no entry; no-op when no
+ * project is open or the host is already covered.
+ */
+async function consentEgressForEndpoint(baseUrl: string): Promise<void> {
+  let host = "";
+  try {
+    host = new URL(baseUrl).hostname;
+  } catch {
+    return;
+  }
+  if (!host || host === "localhost" || host === "::1" || host.startsWith("127.")) {
+    return;
+  }
+  const cfgStore = useProjectConfigStore.getState();
+  const entries = cfgStore.config?.capabilities.network_allowlist;
+  // Entries may be bare hosts, host:port, or URL prefixes — a substring check
+  // covers all three for dedup (worst case we skip adding a redundant entry).
+  if (!entries || entries.some((e) => e.includes(host))) return;
+  await cfgStore.setNetworkAllowlist([...entries, host]);
+}
+
 async function persistSavedRuntimes(list: SavedRuntime[]): Promise<void> {
   try {
     const store = await load(RUNTIMES_STORE_FILE, { defaults: {}, autoSave: false });
@@ -653,6 +679,9 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     });
     await useProjectConfigStore.getState().setRuntimeBaseUrl(trimmed);
     await useProjectConfigStore.getState().setRuntimeApiKey(apiKey || null);
+    // Adding the endpoint is the consent moment — open the egress gate for
+    // exactly this host so the first chat isn't blocked with a settings detour.
+    await consentEgressForEndpoint(trimmed);
     await refreshModels(set, get, cfg);
     return { ok: true };
   },
@@ -685,6 +714,8 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     );
     set({ savedRuntimes: next });
     await persistSavedRuntimes(next);
+    // Editing an endpoint is as much a consent act as adding one.
+    await consentEgressForEndpoint(trimmed);
     // If we just edited the active runtime, re-apply it so the new URL/key take
     // effect right away (and the project config stays in sync).
     if (get().active?.baseUrl === oldBaseUrl) {
@@ -756,6 +787,11 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
           apiKey: active.apiKey ?? null,
           name: labelForUrl(active.baseUrl),
         });
+        // The project's own config carries this endpoint — consent the user
+        // already gave when they entered it. Honor it at the egress gate so a
+        // pre-existing remote runtime (e.g. OpenRouter from an older version)
+        // doesn't hit a "blocked" toast on its first chat after upgrading.
+        await consentEgressForEndpoint(active.baseUrl);
       }
       const healthy = await checkRuntimeHealth(
         active.baseUrl,

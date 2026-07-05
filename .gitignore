@@ -32,3 +32,10 @@ Thumbs.db
 /AKA-Sidecar-Stress-Test-Report.md
 /AKA-Sidecar-Stress-Test-Report.pdf
 /aka-product-page-content.md
+
+# Compiled config debris — vite resolves vite.config.js BEFORE .ts, so a stale
+# compiled copy silently shadows the real config. Never track these.
+vite.config.js
+vite.config.d.ts
+vite.config.mjs
+*.tsbuildinfo

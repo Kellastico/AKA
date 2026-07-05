@@ -1,6 +1,6 @@
 [package]
 name = "aka"
-version = "1.4.2"
+version = "1.4.3"
 description = "AKA — local-first agentic coder desktop app"
 edition = "2021"
 # Two binaries live in this crate (the app `aka` + the `aka-tool` shim). Pin the

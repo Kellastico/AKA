@@ -108,9 +108,9 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            usage: "read_file {path} — read a UTF-8 text file within the project",
+            usage: "read_file {path, offset?, limit?} — read a UTF-8 text file within the project (paged)",
             category: "fs",
-            model_desc: "Read a text file within the project.",
+            model_desc: "Read a text file within the project; use offset/limit to page big files.",
             folder: Capability::FsRead,
             kind: ToolKind::Native,
             shim: false,

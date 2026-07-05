@@ -117,22 +117,29 @@ existing agent. None spawns no subprocess, so it emits no `AGENT_*` env.
 
 ---
 
-## 5. The None posture _(planned — Task 1, native-when-supported + `@@aka` fallback)_
+## 5. The None posture _(SHIPPED read-only in v1.4.2; writes/exec = v1.5)_
 
 "None" = no third-party agent; AKA drives the model directly through its own
-minimal loop, exposing the house tool layer (folder-scoped, default-deny) with
-checkpoints and the trust split still applied. **Today** None is wired to plain
-chat (no edit loop); the agentic loop is the next pass. The decided design:
+loop (`src/lib/builtin-loop.ts`, wired in `use-chat-store.ts`), exposing the
+house tool layer (folder-scoped, default-deny). What ships today:
 
-- If the model **supports native tool-calling**, AKA supplies the tools and runs
-  a native `tools`/`tool_calls` loop — no phase-gating, no text-ReAct tax, maximum
-  model autonomy. (Adds tool-calling to `llm.rs`.)
-- If it **does not**, None falls back to the **`@@aka` line-protocol loop** (the
-  existing `createProtocolParser` path, see `docs/builtin-agent-loop-design.md`)
-  rather than dropping straight to chat — so weak local models still get an edit
-  loop where they can.
-- If the model can do **neither** reliably, None degrades to **plain chat (no
-  edits)** with a clear in-UI notice explaining why.
+- **None + Strategize** runs the READ-ONLY loop: `read_file` (paged —
+  `offset`/`limit`, ~24 KB/result cap so small-context models survive),
+  `list_dir`, `search_files`, `diagnostics`. The system prompt grounds the model
+  in the project (name, root, top-level listing) before its first turn, and the
+  loop reports its real prompt size to the context meter every turn.
+- **Transport is capability-detected**: native `tools`/`tool_calls` when
+  `classifyModel` says the model supports it (`callLlmTools` — works through the
+  OpenAI-compatible, Anthropic, and Google provider adapters in
+  `commands/providers.rs`); otherwise the **`@@aka {"call":…}` text protocol**
+  (`runTextToolLoop`) so weak local models still get the loop.
+- **Step budget (16) + Stop** bound every run; a `no-progress` turn ends
+  honestly rather than looping.
+- **Chat Only** stays pure chat; **Execute** stays the subprocess-agent path.
+- **v1.5 (planned)**: the `fs_write` tools (`str_replace`/`apply_diff`/
+  `delete_file`) are already advertised at the Write phase and route to AKA's
+  enforced edit commands (checkpoint-before-write + approval + witness); wiring
+  Execute+None to that phase is the next pass.
 
 House safety, checkpoints, and the trust split are identical to every other
 posture.

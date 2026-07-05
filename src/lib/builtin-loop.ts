@@ -33,7 +33,23 @@ export type LoopHooks = {
   onToolStart?: (call: { name: string; argumentsJson: string }) => void;
   onToolEnd?: (result: { name: string; ok: boolean; content: string }) => void;
   onFinal?: (text: string) => void;
+  /**
+   * Estimated prompt size (tokens ≈ serialized chars / 4) reported before every
+   * model turn. The loop's REAL history — tool results included — is invisible
+   * to the transcript-based meter, so this is what keeps the context meter
+   * honest during a run, especially on small-context local models.
+   */
+  onUsage?: (estimatedTokens: number) => void;
 };
+
+/** Rough wire-size estimate of a message array: serialized chars / 4. */
+function estimateTokens(messages: unknown[]): number {
+  try {
+    return Math.round(JSON.stringify(messages).length / 4);
+  } catch {
+    return 0;
+  }
+}
 
 export type LoopOptions = {
   /** System prompt (task envelope + tool guidance), prepended once. */
@@ -105,6 +121,7 @@ export async function runNativeToolLoop(opts: LoopOptions): Promise<LoopResult> 
     if (aborted(opts.signal)) return { finalText: null, steps, stopReason: "aborted" };
     steps += 1;
 
+    opts.hooks?.onUsage?.(estimateTokens(messages));
     const turn = await opts.modelTurn(messages);
     if (turn.reasoning && opts.hooks?.onReasoning) opts.hooks.onReasoning(turn.reasoning);
 
@@ -257,6 +274,7 @@ export async function runTextToolLoop(
     if (aborted(opts.signal)) return { finalText: null, steps, stopReason: "aborted" };
     steps += 1;
 
+    opts.hooks?.onUsage?.(estimateTokens(messages));
     const response = await opts.textTurn(messages);
     const { prose, calls } = parseTextToolCalls(response);
     if (prose && opts.hooks?.onReasoning && calls.length > 0) {
