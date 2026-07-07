@@ -20,8 +20,19 @@ export function BottomBar() {
   }
 
   return (
-    <footer className="flex h-16 shrink-0 items-center gap-2 px-4">
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+    // data-tauri-drag-region: the rail's empty stretch (right of the pills) is
+    // one of the few large chrome surfaces — let it move the window, macOS
+    // style. Tauri only triggers on the exact element clicked, so the attribute
+    // sits on both the footer and the inner flex track; pills/buttons on top
+    // keep working normally.
+    <footer
+      data-tauri-drag-region
+      className="flex h-16 shrink-0 items-center gap-2 px-4"
+    >
+      <div
+        data-tauri-drag-region
+        className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto"
+      >
         {projects.map((p) => (
           <ProjectPill key={p.id} project={p} />
         ))}

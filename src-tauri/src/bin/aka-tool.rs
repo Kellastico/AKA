@@ -32,6 +32,7 @@ fn main() {
 
     let code = match sub {
         "diagnostics" => run_diagnostics(rest),
+        "capture-window" => run_capture_window(rest),
         "list" => {
             // Agents only see tools the shim actually implements — never the
             // native-loop-only tools (read_file/str_replace/…) they can't run here.
@@ -76,12 +77,27 @@ fn project_dir(rest: &[String]) -> PathBuf {
 struct ShimConfig {
     #[serde(default)]
     agent: ShimAgent,
+    #[serde(default)]
+    capabilities: ShimCapabilities,
 }
 
 #[derive(serde::Deserialize, Default)]
 struct ShimAgent {
     #[serde(default)]
     diagnostics_cmd: String,
+}
+
+/// The slice of `capabilities` the shim self-enforces against. The host policy
+/// layer (`tools::policy`) is unreachable from the shim (it links only
+/// `catalog.rs`), so a deny-by-default shim tool reads its own grant here and
+/// gates itself the same way `policy::check` would — same source of truth
+/// (`.äkä/config.json`), same opt-in list.
+#[derive(serde::Deserialize, Default)]
+struct ShimCapabilities {
+    /// Tool/process names opted into the deny-by-default `exec` folder. Empty =
+    /// nothing in `exec` may run (the safe default).
+    #[serde(default)]
+    exec_allow: Vec<String>,
 }
 
 /// Read `<project>/.äkä/config.json`, ignoring every field but the one this
@@ -125,6 +141,22 @@ struct ShimError {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool: Option<&'static str>,
     error: String,
+}
+
+/// Result of a successful `capture-window` run. `kind:"image"` is the render hint
+/// the `@@aka` sentinel + output-console carry so the panel shows the actual image
+/// (via `path`), not a bare filename.
+#[derive(Serialize)]
+struct CaptureResult {
+    ok: bool,
+    tool: &'static str,
+    kind: &'static str,
+    /// Absolute path of the written PNG.
+    path: String,
+    width: u32,
+    height: u32,
+    /// The window title/app-name that was matched and captured.
+    window: String,
 }
 
 fn run_diagnostics(rest: &[String]) -> i32 {
@@ -255,6 +287,161 @@ fn normalize_sev(s: &str) -> String {
     .to_string()
 }
 
+// ---------- capture-window ----------
+
+/// Read a `--flag <value>` pair out of the passthrough args.
+fn flag_value<'a>(rest: &'a [String], flag: &str) -> Option<&'a str> {
+    rest.iter()
+        .position(|a| a == flag)
+        .and_then(|i| rest.get(i + 1))
+        .map(String::as_str)
+}
+
+/// Default output path: a timestamped PNG in the OS temp dir, so a capture never
+/// pollutes the project tree. Writing out-of-scope is exactly what the `exec`
+/// opt-in permits — an `fs_write` classification would have forced the PNG into
+/// the repo root instead.
+fn default_capture_path() -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("aka-capture-{ts}.png"))
+}
+
+/// Capture AKA's own window to a PNG.
+///
+/// Self-gated: `capture-window` lives in the deny-by-default `exec` folder, so it
+/// runs only when `capabilities.exec_allow` in `.äkä/config.json` names it — the
+/// same grant `policy::check`'s `Exec` arm enforces host-side (the shim can't link
+/// the policy layer, so it re-checks the one shared source of truth itself).
+/// Without the grant it refuses and exits non-zero, exactly like any gated tool.
+///
+/// Exit code follows the shim philosophy: 0 on a successful capture; non-zero only
+/// when the shim can't do its job (not granted, no matching window, capture/save
+/// failure).
+fn run_capture_window(rest: &[String]) -> i32 {
+    let project = match project_dir(rest).canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            print_json(&ShimError {
+                ok: false,
+                tool: Some("capture-window"),
+                error: format!("project dir not found: {e}"),
+            });
+            return 1;
+        }
+    };
+
+    // Capability gate: `exec` is deny-by-default, opt-in only.
+    let granted = load_config(&project)
+        .capabilities
+        .exec_allow
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case("capture-window"));
+    if !granted {
+        print_json(&ShimError {
+            ok: false,
+            tool: Some("capture-window"),
+            error: "capture-window is denied — the `exec` capability is deny-by-default; add \
+                    \"capture-window\" to capabilities.exec_allow in .äkä/config.json to grant it"
+                .into(),
+        });
+        return 1;
+    }
+
+    // Which window: `--window <title>` wins, else AKA's own ("AKA").
+    let want = flag_value(rest, "--window").unwrap_or("AKA");
+
+    let windows = match xcap::Window::all() {
+        Ok(w) => w,
+        Err(e) => {
+            print_json(&ShimError {
+                ok: false,
+                tool: Some("capture-window"),
+                error: format!("failed to enumerate windows: {e}"),
+            });
+            return 1;
+        }
+    };
+
+    // Match on title OR app-name, case-insensitive. Never fall back to a random
+    // window — capturing the wrong surface silently would be worse than failing.
+    let mut matched: Option<(xcap::Window, String)> = None;
+    let mut seen: Vec<String> = Vec::new();
+    for w in windows {
+        let title = w.title().unwrap_or_default();
+        let app = w.app_name().unwrap_or_default();
+        let label = if title.is_empty() { app.clone() } else { title.clone() };
+        if !label.is_empty() {
+            seen.push(label.clone());
+        }
+        if title.eq_ignore_ascii_case(want) || app.eq_ignore_ascii_case(want) {
+            matched = Some((w, label));
+            break;
+        }
+    }
+
+    let (window, window_label) = match matched {
+        Some(m) => m,
+        None => {
+            print_json(&ShimError {
+                ok: false,
+                tool: Some("capture-window"),
+                error: format!(
+                    "no window matching '{want}' found (open windows: {})",
+                    if seen.is_empty() { "none".into() } else { seen.join(", ") }
+                ),
+            });
+            return 1;
+        }
+    };
+
+    let image = match window.capture_image() {
+        Ok(img) => img,
+        Err(e) => {
+            print_json(&ShimError {
+                ok: false,
+                tool: Some("capture-window"),
+                // On macOS a permission-denied capture surfaces here — the OS
+                // Screen Recording prompt is the transparency gate we rely on.
+                error: format!(
+                    "capture failed for '{window_label}': {e} \
+                     (grant Screen Recording permission to AKA if this is macOS)"
+                ),
+            });
+            return 1;
+        }
+    };
+
+    let width = image.width();
+    let height = image.height();
+
+    let out = flag_value(rest, "--out")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_capture_path);
+
+    if let Err(e) = image.save(&out) {
+        print_json(&ShimError {
+            ok: false,
+            tool: Some("capture-window"),
+            error: format!("failed to write PNG {}: {e}", out.display()),
+        });
+        return 1;
+    }
+
+    print_json(&CaptureResult {
+        ok: true,
+        tool: "capture-window",
+        kind: "image",
+        path: out.to_string_lossy().into_owned(),
+        width,
+        height,
+        window: window_label,
+    });
+    0
+}
+
 // ---------- output ----------
 
 fn print_json<T: Serialize>(v: &T) {
@@ -269,8 +456,9 @@ fn print_help() {
         "aka-tool — AKA built-in tool shim\n\n\
          Usage:\n  aka-tool <tool> [args]\n\n\
          Tools:\n  \
-         diagnostics   run the project's configured typecheck/lint (agent.diagnostics_cmd)\n  \
-         list          print the built-in tool catalog as JSON\n\n\
+         diagnostics     run the project's configured typecheck/lint (agent.diagnostics_cmd)\n  \
+         capture-window  screenshot AKA's own window to a PNG (opt-in via capabilities.exec_allow)\n  \
+         list            print the built-in tool catalog as JSON\n\n\
          Project: --project <path> | $AKA_PROJECT_DIR | current dir\n\
          Output:  one JSON object on stdout; exit is non-zero only on shim failure."
     );

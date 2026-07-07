@@ -66,6 +66,9 @@ type Marker = {
   tool?: string;
   name?: string;
   path?: string;
+  /** Result render hint. `"image"` → `path` is a captured image; the output
+   *  console shows the actual picture inline (e.g. `capture-window`). */
+  kind?: string;
   preview?: string;
   ok?: boolean;
   ms?: number;
@@ -148,12 +151,18 @@ export function createProtocolParser(): AgentParser {
         (typeof j.name === "string" && j.name) ||
         (typeof j.tool === "string" ? j.tool : "tool");
       const path = typeof j.path === "string" ? j.path : undefined;
+      // `kind:"image"` marks `path` as a captured image (e.g. capture-window) —
+      // thread it as `imagePath` so the output console renders the picture inline
+      // rather than a bare filename. Distinct from `path` (the file-chip/diff
+      // target), so a plain file tool never renders as an image.
+      const imagePath = j.kind === "image" && path ? path : undefined;
 
       const start: AgentEvent = {
         type: "tool_start",
         name,
         kind,
         ...(path ? { path } : {}),
+        ...(imagePath ? { imagePath } : {}),
       };
       const end: AgentEvent = {
         type: "tool_end",
@@ -161,6 +170,7 @@ export function createProtocolParser(): AgentParser {
         ...(typeof j.ms === "number" ? { elapsedMs: j.ms } : {}),
         ...(typeof j.preview === "string" ? { preview: j.preview } : {}),
         ...(path ? { path } : {}),
+        ...(imagePath ? { imagePath } : {}),
         ...(typeof j.linesAdded === "number" ? { linesAdded: j.linesAdded } : {}),
         ...(typeof j.linesRemoved === "number"
           ? { linesRemoved: j.linesRemoved }

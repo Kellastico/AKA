@@ -29,6 +29,9 @@ export type AgentEvent =
       name: string;
       kind: ToolKind;
       path?: string;
+      /** Captured-image path (`kind:"image"` markers, e.g. capture-window) — the
+       *  output console renders the actual picture inline from it. */
+      imagePath?: string;
       /** Readable tool input (e.g. a ReAct `Action Input` JSON line). */
       input?: string;
     }
@@ -38,6 +41,8 @@ export type AgentEvent =
       elapsedMs?: number;
       preview?: string;
       path?: string;
+      /** Captured-image path — see `tool_start.imagePath`. */
+      imagePath?: string;
       linesAdded?: number;
       linesRemoved?: number;
       /** Host witness: SHA-256 of the real post-edit content (recorded change). */

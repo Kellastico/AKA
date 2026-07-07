@@ -77,18 +77,27 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ---- Apple code signing + notarization (TEMPORARILY DISABLED) ----
-          # Signing is OFF for now: the Apple secrets were half-configured
-          # (empty APPLE_SIGNING_IDENTITY + a cert that failed `security import`),
-          # which broke the macOS build instead of falling back cleanly. With the
-          # APPLE_* env removed, tauri-action skips signing and produces an
-          # unsigned (ad-hoc) bundle, so the macOS legs build successfully.
+          # ---- Apple code signing + notarization ----
+          # When these secrets are present, tauri-action imports the Developer ID
+          # cert and signs the app + sidecars under the hardened runtime, then
+          # notarizes and staples the *.app*. See .github/MACOS_SIGNING.md.
           #
-          # The repo secrets are left intact. To re-enable signed + notarized
-          # builds, fix the 6 secrets per .github/MACOS_SIGNING.md and restore
-          # the APPLE_* env lines below:
-          #   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
-          #   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+          # NOTE: tauri-action notarizes the .app but NOT the .dmg wrapper — a
+          # downloaded, quarantined un-notarized DMG still fails to mount with
+          # "the disk image is corrupted". The "Notarize + staple DMG" step below
+          # closes that gap.
+          #
+          # Only the macOS legs consume these; on Linux/Windows they're ignored.
+          # If the secrets are ever cleared, they resolve to empty strings and
+          # tauri-action falls back to an unsigned bundle instead of failing —
+          # but keep all six set together (a cert with an empty SIGNING_IDENTITY
+          # is the half-config that broke earlier builds).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: ${{ github.event.inputs.tag || github.ref_name }}
@@ -98,3 +107,36 @@ jobs:
           # successful multi-platform build goes live on its own.
           releaseDraft: false
           args: ${{ matrix.args }}
+
+      # tauri-action notarizes the .app but leaves the .dmg wrapper un-notarized,
+      # so a browser-downloaded DMG still hits Gatekeeper's "disk image is
+      # corrupted". Submit the finished DMG to the notary service, staple the
+      # ticket, and re-upload the stapled asset over the one tauri-action just
+      # published. macOS legs only; no-ops cleanly if the secrets are absent.
+      - name: Notarize + staple DMG (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "Apple notary credentials absent — unsigned build, skipping DMG notarization."
+            exit 0
+          fi
+          DMG=$(find "src-tauri/target/${{ matrix.sidecar_triple }}/release/bundle/dmg" -name '*.dmg' | head -n1)
+          if [ -z "$DMG" ]; then
+            echo "No DMG produced for this target — skipping."
+            exit 0
+          fi
+          echo "Notarizing $DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -v "$DMG"
+          echo "Re-uploading stapled DMG to release $TAG"
+          gh release upload "$TAG" "$DMG" --clobber

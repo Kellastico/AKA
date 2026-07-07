@@ -67,3 +67,21 @@ spctl -a -t open --context context:primary-signature -v AKA_1.3.7_aarch64.dmg
 > `externalBin`) are signed by the Tauri bundler with the same identity +
 > hardened runtime. If notarization ever rejects a nested binary, add an
 > entitlements file under `bundle.macOS.entitlements` and re-run.
+
+## Hardened-runtime entitlements
+
+`bundle.macOS.entitlements` points at `src-tauri/entitlements.plist`. Notarization
+requires the hardened runtime, and these four exceptions are what let a hardened
+AKA still do its job:
+
+| Entitlement | Why AKA needs it |
+|-------------|------------------|
+| `com.apple.security.cs.allow-jit` | WKWebView's JavaScript JIT. |
+| `com.apple.security.cs.allow-unsigned-executable-memory` | WKWebView JS engine. |
+| `com.apple.security.cs.disable-library-validation` | AKA is an orchestrator — it launches the user's **own** agents and local model runtimes, which are not signed by our Team ID. Without this, the hardened runtime kills those child processes. |
+| `com.apple.security.cs.allow-dyld-environment-variables` | Sidecars/agents are spawned with a customized environment (PATH, model/runtime vars). |
+
+> ⚠️ Keep `entitlements.plist` **comment-free**. Apple's entitlements parser
+> (AMFI) is not a full XML parser and fails on `<!-- … -->` with
+> `AMFIUnserializeXML: syntax error` mid-codesign. Document the rationale here,
+> not in the plist.

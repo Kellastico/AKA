@@ -14,7 +14,7 @@ export function TopBar() {
       className="relative flex h-14 shrink-0 items-center pr-4"
       style={{ paddingLeft: TRAFFIC_LIGHT_RESERVE }}
     >
-      <div className="flex shrink-0 items-center gap-2">
+      <div data-tauri-drag-region className="flex shrink-0 items-center gap-2">
         <RuntimeButton />
         <PluginsButton />
       </div>

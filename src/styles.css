@@ -300,6 +300,89 @@ body,
   to   { opacity: 0; transform: translateY(-140%) scale(0.96); }
 }
 
+/* ── Range sliders (Advanced Settings tuning) ───────────────────────────
+   Native <input type=range> restyled into a hair-thin 3px rail with an amber
+   fill up to the thumb (driven by the inline `--pct` var the component sets)
+   and a small glass bead for the thumb. WKWebView is the only runtime that
+   ships, so the -webkit pseudo-elements are what count; the -moz block just
+   keeps the browser-dev preview honest. */
+.aka-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px; /* pointer hit-area; the visible rail is only 3px */
+  background: transparent;
+  cursor: pointer;
+}
+.aka-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    #f59e0b 0 var(--pct, 0%),
+    rgba(255, 255, 255, 0.14) var(--pct, 0%) 100%
+  );
+}
+.aka-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 15px;
+  width: 15px;
+  margin-top: -6px; /* centre the bead on the 3px rail */
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle at 35% 28%,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0.5) 58%,
+    rgba(255, 255, 255, 0.22)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.45),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.9);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.aka-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.13);
+}
+.aka-slider:active::-webkit-slider-thumb,
+.aka-slider:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.06);
+  box-shadow:
+    0 0 0 4px rgba(245, 158, 11, 0.22),
+    0 1px 3px rgba(0, 0, 0, 0.45),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.9);
+}
+.aka-slider:focus-visible {
+  outline: none;
+}
+/* Firefox (browser-dev preview only) */
+.aka-slider::-moz-range-track {
+  height: 3px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.aka-slider::-moz-range-progress {
+  height: 3px;
+  border-radius: 9999px;
+  background: #f59e0b;
+}
+.aka-slider::-moz-range-thumb {
+  height: 15px;
+  width: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 9999px;
+  background: radial-gradient(
+    circle at 35% 28%,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0.5) 58%,
+    rgba(255, 255, 255, 0.22)
+  );
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.45),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.9);
+}
+
 @theme {
   --animate-icon-pulse: icon-pulse 1.4s ease-in-out infinite;
   --animate-toast-in: toast-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) forwards;

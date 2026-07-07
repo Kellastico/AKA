@@ -66,13 +66,21 @@ type ProjectConfigState = {
    * apply to the next call — no restart.
    */
   setNetworkAllowlist: (entries: string[]) => Promise<void>;
-  // NOTE: The model-tuning fields (runtime.system_prompt / temperature / top_p /
-  // vision, and task_template) are intentionally edited at the .äkä/config.json
-  // level for now — there is deliberately no in-app setter/UI yet. The backend
-  // and Task Envelope read them straight from disk on each run, and AKA applies
-  // its accuracy-leaning defaults when they're unset, so most users get the
-  // sharpening automatically. Re-add `setRuntimeTuning` / `setTaskTemplate` here
-  // (mirroring `setAgent`) when the tuning UI lands later.
+  /**
+   * Update the sampling controls (`runtime.temperature` / `runtime.top_p`).
+   * Exposed through the Runtime modal's Advanced Settings sliders. A `null`
+   * value clears the override so the backend falls back to AKA's
+   * accuracy-leaning defaults (temperature 0.15 / top_p 0.9). Read from disk on
+   * every run, so changes apply to the next call — no restart.
+   */
+  setRuntimeTuning: (
+    patch: Partial<Pick<ProjectConfig["runtime"], "temperature" | "top_p">>,
+  ) => Promise<void>;
+  // NOTE: The remaining model-tuning fields (runtime.system_prompt / vision, and
+  // task_template) are still intentionally edited at the .äkä/config.json level
+  // — there is deliberately no in-app setter/UI for those yet. The backend and
+  // Task Envelope read them straight from disk on each run. Re-add
+  // `setTaskTemplate` here (mirroring `setAgent`) when that UI lands later.
 };
 
 /**
@@ -343,6 +351,13 @@ export const useProjectConfigStore = create<ProjectConfigState>((set, get) => ({
       ...config,
       capabilities: { ...config.capabilities, network_allowlist: entries },
     };
+    await persist(set, projectPath, next);
+  },
+
+  setRuntimeTuning: async (patch) => {
+    const { projectPath, config } = get();
+    if (!projectPath || !config) return;
+    const next = { ...config, runtime: { ...config.runtime, ...patch } };
     await persist(set, projectPath, next);
   },
 }));

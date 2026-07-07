@@ -124,6 +124,35 @@ describe("createProtocolParser", () => {
     });
   });
 
+  it("threads a kind:image marker's path as imagePath (capture-window)", () => {
+    // The sentinel an agent emits after a successful `aka-tool capture-window`
+    // run — the JSON fields come verbatim from the shim's CaptureResult.
+    const p = createProtocolParser();
+    const events = p.feed(
+      '@@aka {"tool":"capture-window","name":"capture-window","path":"/tmp/aka-capture-1.png","kind":"image","ms":120}',
+    );
+    expect(events).toEqual([
+      {
+        type: "tool_start",
+        name: "capture-window",
+        kind: "run", // unknown tool verb → run accent
+        path: "/tmp/aka-capture-1.png",
+        imagePath: "/tmp/aka-capture-1.png",
+      },
+      {
+        type: "tool_end",
+        ok: true,
+        elapsedMs: 120,
+        path: "/tmp/aka-capture-1.png",
+        imagePath: "/tmp/aka-capture-1.png",
+      },
+    ]);
+    // A plain file tool never gains an imagePath — kind:"image" is required.
+    const plain = p.feed('@@aka {"tool":"read","path":"a.png"}');
+    expect(plain[0]).not.toHaveProperty("imagePath");
+    expect(plain[1]).not.toHaveProperty("imagePath");
+  });
+
   it("surfaces an in-band capability announcement as a capabilities event", () => {
     const p = createProtocolParser();
     const events = p.feed(

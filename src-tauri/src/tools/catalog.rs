@@ -107,6 +107,29 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             native: true,
         },
         ToolSpec {
+            name: "capture-window",
+            usage: "aka-tool capture-window [--out <path>] [--window <title>] — capture AKA's \
+                    own window to a PNG and return {path,kind:\"image\",width,height}",
+            category: "capture",
+            model_desc: "Capture a screenshot of AKA's window and return the image path.",
+            // `Exec`, not `fs_write`: a House tool self-classifies by *effect*, and
+            // effect here is reading the whole display — off-project pixels that can
+            // hold secrets from other apps — behind an OS permission prompt. That's
+            // the maximally-untrusted floor, so it lives in the deny-by-default `exec`
+            // folder and is opt-in only (`capabilities.exec_allow` names it). The
+            // shim self-gates against that list before it ever captures (it can't
+            // link the host policy layer). Placing it in `fs_write` would understate
+            // the screen-read and force the PNG into project scope; `exec`'s opt-in
+            // lets the capture land in a temp dir instead.
+            folder: Capability::Exec,
+            // Runs an engine built into the shim (xcap), not a user command.
+            kind: ToolKind::Native,
+            shim: true,
+            // Not exposed to the built-in native loop — this is an agent-facing
+            // capture tool, surfaced via the `aka-tool` CLI only.
+            native: false,
+        },
+        ToolSpec {
             name: "read_file",
             usage: "read_file {path, offset?, limit?} — read a UTF-8 text file within the project (paged)",
             category: "fs",

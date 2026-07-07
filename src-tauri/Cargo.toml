@@ -1,6 +1,6 @@
 [package]
 name = "aka"
-version = "1.4.3"
+version = "1.4.4"
 description = "AKA — local-first agentic coder desktop app"
 edition = "2021"
 # Two binaries live in this crate (the app `aka` + the `aka-tool` shim). Pin the
@@ -37,6 +37,14 @@ regex = "1"
 # registry ToolEntry — the forward hook for the Garden/Marketplace filtering
 # surface. Never used for an enforcement decision.
 sha2 = "0.10"
+# Cross-platform native window/screen capture (Apache-2.0). Powers the
+# `aka-tool capture-window` shim tool. Re-exports the `image` crate; `image` is
+# pinned below with the `png` feature so captured frames encode to PNG. On macOS
+# the first capture triggers the OS Screen Recording permission prompt — the
+# transparency guarantee, enforced by the OS itself, not something the shim can
+# suppress.
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -95,6 +95,13 @@ export type Message = {
    * "Edited index.html:42".
    */
   toolPreview?: string;
+  /**
+   * Absolute path of a captured image this tool produced (from a
+   * `kind:"image"` `@@aka` marker, e.g. `capture-window`). When set, the tool
+   * node renders the actual picture inline (via the Tauri asset protocol) so
+   * the user sees exactly what was captured, not just a file path.
+   */
+  toolImagePath?: string;
   // Diff stats — set on assistant messages that produced code changes
   linesAdded?: number;
   linesRemoved?: number;

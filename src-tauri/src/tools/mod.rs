@@ -198,7 +198,9 @@ mod tests {
     #[test]
     fn shadowing_is_case_insensitive() {
         let declared = vec!["DIAGNOSTICS".to_string()];
-        assert!(effective_tools(&declared).is_empty());
+        assert!(effective_tools(&declared)
+            .iter()
+            .all(|t| t.name != "diagnostics"));
         assert_eq!(shadowed_tools(&declared), vec!["diagnostics"]);
     }
 

@@ -242,7 +242,11 @@ export function AppShell() {
   }, [currentSessionId, clearPanes]);
 
   return (
-    <div className="flex h-screen flex-col gap-2 text-ink">
+    // data-tauri-drag-region on the shell root makes the thin gap strips
+    // between top bar / workspace / bottom rail draggable too — every bit of
+    // bare chrome should move the window (macOS feel). Only clicks that land
+    // directly on this div trigger a drag; all children behave as before.
+    <div data-tauri-drag-region className="flex h-screen flex-col gap-2 text-ink">
       <TopBar />
       <main className="min-h-0 flex-1 overflow-hidden">
         <Workspace />

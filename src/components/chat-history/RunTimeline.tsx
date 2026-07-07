@@ -11,9 +11,11 @@ import {
   Stack,
   type Icon,
 } from "@phosphor-icons/react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { Message, ToolKind } from "../../stores/use-messages-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { Collapse } from "../Collapse";
+import { ImageLightbox } from "../ImageLightbox";
 import { ErrorBanner } from "../ErrorBanner";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./CopyButton";
@@ -391,9 +393,15 @@ function ReasoningNode({ msg }: { msg: Message }) {
 function ToolNode({ msg }: { msg: Message }) {
   const openDiffForFile = useWorkspaceStore((s) => s.openDiffForFile);
   const [open, setOpen] = useState(false);
+  const [lightbox, setLightbox] = useState(false);
   const running = msg.toolStatus === "running";
   const failed = msg.toolStatus === "failed";
   useTicker(running);
+
+  // Captured-image result (e.g. capture-window): render the actual picture inline
+  // via the Tauri asset protocol so the user sees what was captured in real time,
+  // not a bare path. Click to open the full-screen lightbox.
+  const imageSrc = msg.toolImagePath ? convertFileSrc(msg.toolImagePath) : null;
 
   if (!msg.toolKind) return null;
   const accent = TOOL_ACCENT[msg.toolKind];
@@ -476,11 +484,45 @@ function ToolNode({ msg }: { msg: Message }) {
           />
         </button>
 
+        {/* Captured image — shown inline the moment the tool settles, always
+            visible (no expand needed). Click enlarges via the shared lightbox. */}
+        {imageSrc && (
+          <button
+            type="button"
+            onClick={() => setLightbox(true)}
+            className="mt-1.5 block overflow-hidden rounded-lg border border-white/10 bg-ink/5 transition-colors hover:border-white/25"
+            title="Click to enlarge"
+          >
+            <img
+              src={imageSrc}
+              alt={msg.toolPath ? baseName(msg.toolPath) : "captured window"}
+              className="max-h-48 w-auto max-w-full object-contain"
+            />
+          </button>
+        )}
+        {lightbox && msg.toolImagePath && (
+          <ImageLightbox
+            path={msg.toolImagePath}
+            name={msg.toolPath ? baseName(msg.toolPath) : "Captured window"}
+            onClose={() => setLightbox(false)}
+          />
+        )}
+
         <Collapse open={open}>
           <div className="mt-1 rounded-lg border border-white/10 bg-ink/5 px-2.5 py-2 text-[11px]">
-            {/* edit_file → a diff and nothing else, so the change is pinpointable.
-                Every other tool → its real input + output, not a generic blurb. */}
-            {msg.toolKind === "write" ? (
+            {/* Captured image → the source path (the picture itself is shown
+                inline above). edit_file → a diff and nothing else, so the change
+                is pinpointable. Every other tool → its real input + output. */}
+            {imageSrc ? (
+              <div className="flex flex-col gap-1">
+                <div className="text-[9px] uppercase tracking-wider text-ink/35">
+                  Captured image
+                </div>
+                <span className="font-mono text-[10.5px] text-ink/70 [overflow-wrap:anywhere]">
+                  {msg.toolImagePath}
+                </span>
+              </div>
+            ) : msg.toolKind === "write" ? (
               <DiffView
                 path={msg.toolPath}
                 input={msg.toolInput}

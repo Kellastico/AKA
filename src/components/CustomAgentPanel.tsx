@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  CaretDown,
   CaretLeft,
-  CaretRight,
   Check,
   Copy,
   DownloadSimple,
@@ -24,6 +22,7 @@ import {
   parseCommand,
 } from "../lib/agent-command";
 import { parseRecipe, recipeToJson, toRecipe } from "../lib/agent-recipe";
+import { Disclosure } from "./Disclosure";
 import {
   wrapperCommand,
   wrapperFilename,
@@ -388,6 +387,7 @@ export function CustomAgentPanel({
 
       {/* Advanced */}
       <Disclosure
+        variant="boxed"
         open={showAdvanced}
         onToggle={() => setShowAdvanced((v) => !v)}
         label="Advanced"
@@ -466,6 +466,7 @@ export function CustomAgentPanel({
 
       {/* Import recipe */}
       <Disclosure
+        variant="boxed"
         open={showImport}
         onToggle={() => setShowImport((v) => !v)}
         label="Import a recipe"
@@ -505,6 +506,7 @@ export function CustomAgentPanel({
       {/* Export recipe */}
       {parsed.bin && (
         <Disclosure
+          variant="boxed"
           open={showExport}
           onToggle={() => setShowExport((v) => !v)}
           label="Export as recipe"
@@ -528,6 +530,7 @@ export function CustomAgentPanel({
 
       {/* Wrapper generator */}
       <Disclosure
+        variant="boxed"
         open={showWrapper}
         onToggle={() => setShowWrapper((v) => !v)}
         label="Need a wrapper?"
@@ -633,42 +636,6 @@ function inputClass(hasError: boolean) {
 }
 
 /** Collapsible section with a caret + optional leading icon. */
-function Disclosure({
-  open,
-  onToggle,
-  label,
-  icon,
-  children,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  label: string;
-  icon?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <button
-        onClick={onToggle}
-        className="flex w-full items-center gap-1.5 rounded-lg px-1 py-1 text-left text-[11px] font-medium text-white/55 hover:text-white/85"
-      >
-        {open ? (
-          <CaretDown size={11} className="shrink-0 text-white/40" />
-        ) : (
-          <CaretRight size={11} className="shrink-0 text-white/40" />
-        )}
-        {icon}
-        {label}
-      </button>
-      {open && (
-        <div className="flex flex-col gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-2.5 py-2">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function RequiredField({
   label,
   hint,

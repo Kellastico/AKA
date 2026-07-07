@@ -1112,6 +1112,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           elapsedMs?: number;
           preview?: string;
           path?: string;
+          imagePath?: string;
           linesAdded?: number;
           linesRemoved?: number;
         }) => {
@@ -1133,6 +1134,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           if (event.preview !== undefined) patch.toolPreview = event.preview;
           if (event.path !== undefined) patch.toolPath = event.path;
+          if (event.imagePath !== undefined) patch.toolImagePath = event.imagePath;
           if (event.linesAdded !== undefined) patch.linesAdded = event.linesAdded;
           if (event.linesRemoved !== undefined)
             patch.linesRemoved = event.linesRemoved;
@@ -1192,6 +1194,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       toolKind: event.kind,
                       toolName: event.name,
                       toolPath: event.path,
+                      toolImagePath: event.imagePath,
                       toolInput: event.input,
                       toolStatus: "running",
                       toolStartedAt: Date.now(),

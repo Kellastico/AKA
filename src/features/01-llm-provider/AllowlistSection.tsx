@@ -1,6 +1,11 @@
 import { useState } from "react";
-import { GlobeSimple, Plus, X } from "@phosphor-icons/react";
+import { Plus, X } from "@phosphor-icons/react";
 import { useProjectConfigStore } from "../../stores/use-project-config-store";
+
+// Stable reference for the "no project / empty" case. Returning a fresh `[]`
+// from the selector below would change identity on every render and send
+// zustand into an infinite re-render loop (getSnapshot-not-cached).
+const NO_ENTRIES: readonly string[] = [];
 
 /**
  * Editor for the active project's network egress allowlist
@@ -9,15 +14,17 @@ import { useProjectConfigStore } from "../../stores/use-project-config-store";
  * loopback is always allowed. An entry matches an exact host (with or without
  * port) or a full-URL prefix.
  *
- * Lives in the Runtime modal by design — BYOK/runtime settings belong here,
- * not in a general Settings surface (see features/09-settings/Context.md).
- * The backend re-reads the config from disk on every call, so edits apply to
- * the next request without a restart.
+ * Rendered inside the Runtime modal's Advanced Settings → Network Allowlist
+ * accordion (`AdvancedSettings`), which supplies the section heading — so this
+ * body starts straight at the help text. Runtime/BYOK settings belong here, not
+ * in a general Settings surface (see features/09-settings/Context.md). The
+ * backend re-reads the config from disk on every call, so edits apply to the
+ * next request without a restart.
  */
 export function AllowlistSection() {
   const projectPath = useProjectConfigStore((s) => s.projectPath);
   const entries = useProjectConfigStore(
-    (s) => s.config?.capabilities.network_allowlist ?? [],
+    (s) => s.config?.capabilities.network_allowlist ?? NO_ENTRIES,
   );
   const setNetworkAllowlist = useProjectConfigStore((s) => s.setNetworkAllowlist);
 
@@ -37,13 +44,6 @@ export function AllowlistSection() {
 
   return (
     <div className="flex flex-col gap-2 px-1">
-      <div className="flex items-center gap-1.5">
-        <GlobeSimple size={12} className="text-white/50" />
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-white/50">
-          Network allowlist
-        </span>
-      </div>
-
       {!projectPath ? (
         <p className="px-0.5 text-[10px] leading-relaxed text-white/40">
           Open a project to manage its allowlist. Remote endpoints are blocked
