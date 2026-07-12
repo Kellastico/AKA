@@ -1644,6 +1644,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (genOf(runKey) !== myGen) return;
             useTokenCounterStore.getState().setAgentContext(estimatedTokens, 0);
           },
+          // The model returned an empty turn; the loop is re-asking. Surface it
+          // as a reasoning line so a silent local-model hiccup doesn't look like
+          // the run froze.
+          onEmptyRetry: (attempt: number) => {
+            if (genOf(runKey) !== myGen) return;
+            store().add(
+              {
+                role: "reasoning",
+                content: "",
+                thinkingContent: `The model returned an empty response — retrying (${attempt})…`,
+                thinkingStartedAt: Date.now(),
+                thinkingEndedAt: Date.now(),
+                modelId: modelId || undefined,
+                agentId,
+              },
+              ownerSessionId,
+            );
+          },
           onReasoning: (textChunk: string) => {
             if (genOf(runKey) !== myGen) return;
             store().add(
@@ -1886,7 +1904,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ? "[stopped — step budget reached before the model finished. Try narrowing the task.]"
               : result.stopReason === "aborted"
                 ? ""
-                : "[the model produced no answer]");
+                : result.stopReason === "empty"
+                  ? "[the model kept returning an empty response. This model may be unreliable for tool use — try again, rephrase the task, or pick a different model.]"
+                  : "[the model produced no answer]");
           if (finalText) {
             store().patchMessage(
               placeholderId,

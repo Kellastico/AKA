@@ -34,6 +34,12 @@ export type LoopHooks = {
   onToolEnd?: (result: { name: string; ok: boolean; content: string }) => void;
   onFinal?: (text: string) => void;
   /**
+   * A model turn came back empty (no content, no tool call) and the loop is
+   * re-asking. `attempt` is the 1-based retry number. Lets the caller surface
+   * "the model returned nothing — retrying" instead of a silent pause.
+   */
+  onEmptyRetry?: (attempt: number) => void;
+  /**
    * Estimated prompt size (tokens ≈ serialized chars / 4) reported before every
    * model turn. The loop's REAL history — tool results included — is invisible
    * to the transcript-based meter, so this is what keeps the context meter
@@ -41,6 +47,11 @@ export type LoopHooks = {
    */
   onUsage?: (estimatedTokens: number) => void;
 };
+
+/** Whether a string is absent or only whitespace. */
+function isBlank(s: string | null | undefined): boolean {
+  return s == null || s.trim().length === 0;
+}
 
 /** Rough wire-size estimate of a message array: serialized chars / 4. */
 function estimateTokens(messages: unknown[]): number {
@@ -63,6 +74,14 @@ export type LoopOptions = {
   hooks?: LoopHooks;
   /** Hard cap on model turns, so a confused model can't loop forever. */
   maxSteps?: number;
+  /**
+   * How many times to re-ask a single turn that came back empty (no content,
+   * no tool call) before treating it as terminal. A local model can return an
+   * empty completion intermittently — a transient decode hiccup, not an answer
+   * — so one blank response should not kill the run. Defaults to
+   * {@link DEFAULT_EMPTY_RETRIES}; set 0 to disable.
+   */
+  emptyRetries?: number;
   /** Cooperative cancellation — checked between turns and tool calls. */
   signal?: AbortSignal;
 };
@@ -72,11 +91,16 @@ export type LoopResult = {
   finalText: string | null;
   /** Model turns taken. */
   steps: number;
-  /** Why the loop ended. */
-  stopReason: "final" | "budget" | "aborted" | "no-progress";
+  /**
+   * Why the loop ended. `empty` = the model kept returning nothing even after
+   * retries (distinct from `no-progress`, which is a clean but answerless stop).
+   */
+  stopReason: "final" | "budget" | "aborted" | "no-progress" | "empty";
 };
 
 const DEFAULT_MAX_STEPS = 16;
+/** Default empty-turn re-asks (see {@link LoopOptions.emptyRetries}). */
+const DEFAULT_EMPTY_RETRIES = 3;
 
 /** Build the assistant message that records the tool calls the model made. */
 function assistantToolCallMessage(turn: AssistantTurn): LoopMessage {
@@ -111,6 +135,7 @@ const aborted = (signal?: AbortSignal) => signal?.aborted === true;
  */
 export async function runNativeToolLoop(opts: LoopOptions): Promise<LoopResult> {
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+  const emptyRetries = opts.emptyRetries ?? DEFAULT_EMPTY_RETRIES;
   const messages: LoopMessage[] = [
     { role: "system", content: opts.system },
     { role: "user", content: opts.task },
@@ -122,17 +147,34 @@ export async function runNativeToolLoop(opts: LoopOptions): Promise<LoopResult> 
     steps += 1;
 
     opts.hooks?.onUsage?.(estimateTokens(messages));
-    const turn = await opts.modelTurn(messages);
+    // Re-ask a turn that comes back empty (no content, no tool call): a local
+    // model can return a blank completion intermittently, and giving up on the
+    // first one would strand the run with "no answer" even though the very next
+    // attempt usually succeeds.
+    let turn = await opts.modelTurn(messages);
+    for (
+      let attempt = 1;
+      attempt <= emptyRetries &&
+      turn.toolCalls.length === 0 &&
+      isBlank(turn.content) &&
+      !aborted(opts.signal);
+      attempt += 1
+    ) {
+      opts.hooks?.onEmptyRetry?.(attempt);
+      turn = await opts.modelTurn(messages);
+    }
     if (turn.reasoning && opts.hooks?.onReasoning) opts.hooks.onReasoning(turn.reasoning);
 
-    // No tool calls → the model is done (or gave up). Its content is the answer.
+    // No tool calls → the model is done, gave up, or kept coming back empty.
     if (turn.toolCalls.length === 0) {
-      const finalText = turn.content ?? "";
+      const finalText = (turn.content ?? "").trim();
       opts.hooks?.onFinal?.(finalText);
       return {
         finalText: finalText.length > 0 ? finalText : null,
         steps,
-        stopReason: turn.content != null ? "final" : "no-progress",
+        // A non-blank answer is a clean finish; a still-blank turn after retries
+        // is an `empty` stop the caller can explain more helpfully.
+        stopReason: finalText.length > 0 ? "final" : "empty",
       };
     }
 
@@ -264,6 +306,7 @@ export async function runTextToolLoop(
   opts: Omit<LoopOptions, "modelTurn"> & { textTurn: TextTurn },
 ): Promise<LoopResult> {
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+  const emptyRetries = opts.emptyRetries ?? DEFAULT_EMPTY_RETRIES;
   const messages: TextMessage[] = [
     { role: "system", content: `${opts.system}\n\n${textProtocolSpec(opts.tools)}` },
     { role: "user", content: opts.task },
@@ -275,20 +318,38 @@ export async function runTextToolLoop(
     steps += 1;
 
     opts.hooks?.onUsage?.(estimateTokens(messages));
-    const response = await opts.textTurn(messages);
-    const { prose, calls } = parseTextToolCalls(response);
+    // Re-ask an empty completion (no prose, no marker) a few times before
+    // giving up — a local model can return a blank turn intermittently, and the
+    // next attempt usually carries the real answer or tool call.
+    let response = await opts.textTurn(messages);
+    let parsed = parseTextToolCalls(response);
+    for (
+      let attempt = 1;
+      attempt <= emptyRetries &&
+      parsed.calls.length === 0 &&
+      isBlank(parsed.prose) &&
+      !aborted(opts.signal);
+      attempt += 1
+    ) {
+      opts.hooks?.onEmptyRetry?.(attempt);
+      response = await opts.textTurn(messages);
+      parsed = parseTextToolCalls(response);
+    }
+    const { prose, calls } = parsed;
     if (prose && opts.hooks?.onReasoning && calls.length > 0) {
       // Mid-loop prose is working commentary, not the final answer.
       opts.hooks.onReasoning(prose);
     }
 
     if (calls.length === 0) {
-      const finalText = prose;
+      const finalText = prose.trim();
       opts.hooks?.onFinal?.(finalText);
       return {
         finalText: finalText.length > 0 ? finalText : null,
         steps,
-        stopReason: finalText.length > 0 ? "final" : "no-progress",
+        // Blank after retries is an `empty` stop (distinct, clearer message);
+        // a non-blank answer with no marker is a clean finish.
+        stopReason: finalText.length > 0 ? "final" : "empty",
       };
     }
 

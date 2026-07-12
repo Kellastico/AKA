@@ -24,6 +24,11 @@ function answerTurn(text: string): AssistantTurn {
   return { content: text, reasoning: null, toolCalls: [] };
 }
 
+/** An empty turn — the intermittent local-model hiccup (no content, no calls). */
+function emptyTurn(): AssistantTurn {
+  return { content: "", reasoning: null, toolCalls: [] };
+}
+
 describe("runNativeToolLoop", () => {
   it("executes a tool call, feeds the result back, and returns the final answer", async () => {
     // Turn 1: read a file. Turn 2: answer.
@@ -137,6 +142,45 @@ describe("runNativeToolLoop", () => {
     expect(ended).toEqual([false]); // the failure was surfaced, not thrown
     expect(res.finalText).toBe("That file is missing.");
   });
+
+  it("retries an empty turn and recovers when the next attempt answers", async () => {
+    // Model returns nothing twice (transient hiccup), then a real answer.
+    const turns = [emptyTurn(), emptyTurn(), answerTurn("Recovered.")];
+    let i = 0;
+    const modelTurn = vi.fn(async () => turns[i++]);
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const onEmptyRetry = vi.fn();
+    const res = await runNativeToolLoop({
+      system: "s",
+      task: "t",
+      tools: [],
+      modelTurn,
+      executeTool,
+      hooks: { onEmptyRetry },
+    });
+    expect(res.finalText).toBe("Recovered.");
+    expect(res.stopReason).toBe("final");
+    expect(modelTurn).toHaveBeenCalledTimes(3); // two empties + the answer
+    expect(onEmptyRetry).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up with stopReason 'empty' when every retry stays blank", async () => {
+    const modelTurn = vi.fn(async () => emptyTurn());
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const res = await runNativeToolLoop({
+      system: "s",
+      task: "t",
+      tools: [],
+      modelTurn,
+      executeTool,
+      emptyRetries: 3,
+    });
+    expect(res.finalText).toBeNull();
+    expect(res.stopReason).toBe("empty");
+    // One turn on step 1 (steps=1), retried 3 times = 4 calls total.
+    expect(modelTurn).toHaveBeenCalledTimes(4);
+    expect(res.steps).toBe(1);
+  });
 });
 
 describe("parseTextToolCalls", () => {
@@ -229,6 +273,42 @@ describe("runTextToolLoop", () => {
     const res = await runTextToolLoop({ system: "s", task: "t", tools, textTurn, executeTool });
     expect(res).toEqual({ finalText: "Just an answer.", steps: 1, stopReason: "final" });
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("retries an empty (whitespace-only) response and recovers", async () => {
+    // "" then "   " (both blank), then a real marker call, then the answer.
+    const responses = ["", "   ", '@@aka {"call":"read_file","args":{"path":"a.ts"}}', "Done."];
+    let i = 0;
+    const textTurn = vi.fn(async () => responses[i++]);
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "ok" }));
+    const onEmptyRetry = vi.fn();
+    const res = await runTextToolLoop({
+      system: "s",
+      task: "t",
+      tools,
+      textTurn,
+      executeTool,
+      hooks: { onEmptyRetry },
+    });
+    expect(res.finalText).toBe("Done.");
+    expect(onEmptyRetry).toHaveBeenCalledTimes(2); // the "" and the "   "
+    expect(executeTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up with stopReason 'empty' when the model only ever returns blanks", async () => {
+    const textTurn = vi.fn(async () => "");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const res = await runTextToolLoop({
+      system: "s",
+      task: "t",
+      tools,
+      textTurn,
+      executeTool,
+      emptyRetries: 2,
+    });
+    expect(res.finalText).toBeNull();
+    expect(res.stopReason).toBe("empty");
+    expect(textTurn).toHaveBeenCalledTimes(3); // initial + 2 retries
   });
 });
 

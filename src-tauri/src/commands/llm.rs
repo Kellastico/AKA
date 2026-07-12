@@ -895,8 +895,11 @@ pub async fn call_llm(
         return Err(AppError::RuntimeOffline);
     }
 
+    // 180s matches call_llm_tools: a large local model cold-loading into VRAM
+    // (a 12B can take a while on first call) must not be misread as "runtime
+    // not reachable" before it has even started generating.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(180))
         .build()
         .map_err(|_| AppError::RuntimeOffline)?;
 
