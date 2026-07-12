@@ -3,6 +3,7 @@ import {
   approvalGateFor,
   approvalPrompt,
   needsApproval,
+  normalizeToolArgs,
   parseApprovalMode,
   parseToolArgs,
   stringArg,
@@ -51,6 +52,37 @@ describe("parseApprovalMode", () => {
     expect(parseApprovalMode("bypass")).toBe("ask");
     expect(parseApprovalMode(undefined)).toBe("ask");
     expect(parseApprovalMode(null)).toBe("ask");
+  });
+});
+
+describe("normalizeToolArgs", () => {
+  it("maps observed str_replace aliases old/new onto old_str/new_str", () => {
+    const out = normalizeToolArgs("str_replace", {
+      path: "index.html",
+      old: "<div>",
+      new: "<footer>",
+    });
+    expect(out.old_str).toBe("<div>");
+    expect(out.new_str).toBe("<footer>");
+  });
+
+  it("never overwrites a canonical name that is already present", () => {
+    const out = normalizeToolArgs("str_replace", {
+      old_str: "canonical",
+      old: "alias",
+    });
+    expect(out.old_str).toBe("canonical");
+  });
+
+  it("maps search_files pattern→query, read_file file→path, bash cmd→command", () => {
+    expect(normalizeToolArgs("search_files", { pattern: "server" }).query).toBe("server");
+    expect(normalizeToolArgs("read_file", { file: "a.ts" }).path).toBe("a.ts");
+    expect(normalizeToolArgs("bash", { cmd: "ls" }).command).toBe("ls");
+  });
+
+  it("leaves unknown tools and non-string aliases untouched", () => {
+    expect(normalizeToolArgs("mystery", { pattern: "x" })).toEqual({ pattern: "x" });
+    expect(normalizeToolArgs("search_files", { pattern: 3 }).query).toBeUndefined();
   });
 });
 

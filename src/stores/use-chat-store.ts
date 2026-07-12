@@ -62,6 +62,7 @@ import {
   approvalGateFor,
   approvalPrompt,
   needsApproval,
+  normalizeToolArgs,
   parseApprovalMode,
   parseToolArgs,
   stringArg,
@@ -1779,15 +1780,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
             argumentsJson: string,
           ): Promise<ToolResult> => {
             bailIfStale();
+            // Parse ONCE and map the arg-name variants models actually emit
+            // (`old`→`old_str`, `pattern`→`query`, …) onto the schema's names,
+            // so a capable-but-sloppy model's calls run instead of bouncing
+            // with anchor/missing-arg errors. Reused by the approval prompt
+            // and every dispatch path below.
+            const args = normalizeToolArgs(name, parseToolArgs(argumentsJson));
+            const normalizedJson = JSON.stringify(args);
+            const s = (k: string) => stringArg(args, k);
+
             // The read-only floor: exactly the pre-existing Strategize path.
             if (phase === "readonly") {
-              return executeBuiltinTool(name, argumentsJson, projectPath, "readonly");
+              return executeBuiltinTool(name, normalizedJson, projectPath, "readonly");
             }
-
-            // Parse the raw arguments ONCE — reused for the approval prompt and
-            // the enforced-command dispatch below.
-            const args = parseToolArgs(argumentsJson);
-            const s = (k: string) => stringArg(args, k);
 
             const gate = approvalGateFor(name);
             if (gate && needsApproval(approvalMode, gate)) {
@@ -1836,7 +1841,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   await deleteFile(projectPath, runKey, s("path"), true);
                   return { ok: true, content: `Deleted ${s("path")}.` };
                 default:
-                  return await executeBuiltinTool(name, argumentsJson, projectPath, phase);
+                  return await executeBuiltinTool(name, normalizedJson, projectPath, phase);
               }
             } catch (err) {
               // Enforced-command rejections (bad anchor, out of scope, patch

@@ -93,6 +93,39 @@ export function stringArg(args: ToolArgs, key: string): string {
 }
 
 /**
+ * Map the argument-name variants models actually emit onto the schema's
+ * canonical names (observed in the wild: `old`/`new` for `str_replace`,
+ * `pattern` for `search_files`). The canonical name always wins when both are
+ * present; aliases only fill a gap. Kept to variants that are unambiguous —
+ * this is leniency for capable-but-sloppy models, not schema guessing.
+ */
+export function normalizeToolArgs(toolName: string, args: ToolArgs): ToolArgs {
+  const out: ToolArgs = { ...args };
+  const alias = (canonical: string, variant: string) => {
+    if (out[canonical] === undefined && typeof out[variant] === "string") {
+      out[canonical] = out[variant];
+    }
+  };
+  switch (toolName) {
+    case "str_replace":
+      alias("old_str", "old");
+      alias("new_str", "new");
+      break;
+    case "search_files":
+      alias("query", "pattern");
+      break;
+    case "read_file":
+    case "delete_file":
+      alias("path", "file");
+      break;
+    case "bash":
+      alias("command", "cmd");
+      break;
+  }
+  return out;
+}
+
+/**
  * The one-line prompt shown on the approval card for a gated call — concrete
  * (the exact command / target file), so the user knows what they're approving.
  * Takes already-parsed args (see {@link parseToolArgs}) so the loop parses the

@@ -7,6 +7,7 @@ import { AttachmentChips } from "./chatbox/AttachmentChips";
 import { DropOverlay } from "./chatbox/DropOverlay";
 import { UsageMeter } from "./chatbox/UsageMeter";
 import { SetupChecklist } from "./chatbox/SetupChecklist";
+import { ToolReliabilityNudge } from "./chatbox/ToolReliabilityNudge";
 import { AgentQuestionCard } from "./chatbox/AgentQuestionCard";
 import { CheckpointTimeline } from "./chatbox/CheckpointTimeline";
 import { ChatHistory } from "./chat-history/ChatHistory";
@@ -105,6 +106,7 @@ function ChatBox({ variant }: { variant: "sm" | "lg" }) {
   return (
     <div ref={containerRef} className="flex flex-col gap-1.5">
       <SetupChecklist />
+      <ToolReliabilityNudge />
       <div className="flex justify-end px-1">
         <UsageMeter />
       </div>

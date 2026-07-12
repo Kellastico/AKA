@@ -207,6 +207,57 @@ describe("parseTextToolCalls", () => {
     const { calls } = parseTextToolCalls('@@aka {"call":"diagnostics"}');
     expect(calls).toEqual([{ name: "diagnostics", argumentsJson: "{}" }]);
   });
+
+  it("parses a marker inline after prose on the same line", () => {
+    const { prose, calls } = parseTextToolCalls(
+      'Let me check the config.@@aka {"call":"read_file","args":{"path":"vite.config.mjs"}}',
+    );
+    expect(prose).toBe("Let me check the config.");
+    expect(calls).toEqual([
+      { name: "read_file", argumentsJson: JSON.stringify({ path: "vite.config.mjs" }) },
+    ]);
+  });
+
+  it("parses several markers concatenated on one line (real model output)", () => {
+    // Verbatim shape observed from a local model: prose then three back-to-back calls.
+    const { prose, calls } = parseTextToolCalls(
+      "I'll investigate your server configuration." +
+        '@@aka {"call":"read_file","args":{"path":"vite.config.mjs"}}' +
+        '@@aka {"call":"read_file","args":{"path":"package.json"}}' +
+        '@@aka {"call":"search_files","args":{"pattern":"server"}}',
+    );
+    expect(prose).toBe("I'll investigate your server configuration.");
+    expect(calls.map((c) => c.name)).toEqual(["read_file", "read_file", "search_files"]);
+    expect(calls[2].argumentsJson).toBe(JSON.stringify({ pattern: "server" }));
+  });
+
+  it("parses JSON that spans multiple lines with raw newlines inside strings", () => {
+    // str_replace payloads carry multi-line code — models write the newlines
+    // literally (invalid JSON) rather than as \n escapes. The repair pass fixes it.
+    const marker =
+      '@@aka {"call":"str_replace","args":{"path":"index.html","old_str":"<!-- Footer-->\n<div>\n</div>","new_str":"<footer class=\\"bg-black\\">\n</footer>"}}';
+    const { prose, calls } = parseTextToolCalls(marker);
+    expect(prose).toBe("");
+    expect(calls).toHaveLength(1);
+    const args = JSON.parse(calls[0].argumentsJson) as Record<string, string>;
+    expect(args.path).toBe("index.html");
+    expect(args.old_str).toBe("<!-- Footer-->\n<div>\n</div>");
+    expect(args.new_str).toBe('<footer class="bg-black">\n</footer>');
+  });
+
+  it("keeps a truncated (unbalanced) marker as prose", () => {
+    const { prose, calls } = parseTextToolCalls(
+      'cut off: @@aka {"call":"read_file","args":{"path":"a.ts"',
+    );
+    expect(calls).toEqual([]);
+    expect(prose).toContain('@@aka {"call":"read_file"');
+  });
+
+  it("a bare @@aka with no object stays prose", () => {
+    const { prose, calls } = parseTextToolCalls("the @@aka protocol is neat");
+    expect(calls).toEqual([]);
+    expect(prose).toBe("the @@aka protocol is neat");
+  });
 });
 
 describe("runTextToolLoop", () => {

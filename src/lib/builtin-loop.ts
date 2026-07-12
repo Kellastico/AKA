@@ -234,43 +234,138 @@ export type TextTurn = (messages: TextMessage[]) => Promise<string>;
 
 export type TextMessage = { role: "system" | "user" | "assistant"; content: string };
 
-/** A tool call extracted from an `@@aka {"call":…}` marker line. */
+/** A tool call extracted from an `@@aka {"call":…}` marker. */
 export type ParsedCall = { name: string; argumentsJson: string };
 
-/** Marker shape the fallback prompt teaches: `@@aka {"call":"read_file","args":{…}}`. */
-const CALL_MARKER_RE = /^\s*@@aka\s+(\{.*\})\s*$/;
+/** The sentinel the fallback prompt teaches: `@@aka {"call":…,"args":{…}}`. */
+const CALL_MARKER = "@@aka";
 
 /**
- * Split a fallback response into prose + tool calls. Lines matching the
- * `@@aka {"call":…}` marker become calls; everything else stays prose (the
- * model's visible reasoning). Malformed or non-call markers are left as prose so
- * nothing is silently swallowed.
+ * From `start` (which must point at a `{`), scan a balanced JSON object.
+ * String-aware — braces inside string literals don't count — and tolerant of
+ * raw newlines inside strings (models emit those; the repair pass below makes
+ * them parseable). Returns the object's source text and the index just past
+ * it, or `null` when the braces never balance (a truncated marker).
+ */
+function scanJsonObject(
+  text: string,
+  start: number,
+): { json: string; end: number } | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return { json: text.slice(start, i + 1), end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/**
+ * Escape raw control characters inside JSON string literals (`\n`/`\r`/`\t`
+ * written literally instead of escaped). Small models routinely emit real
+ * newlines inside `old_str`/`new_str`/`patch` payloads — strictly invalid
+ * JSON, but unambiguous — so repairing beats dropping the call.
+ */
+function escapeControlCharsInStrings(json: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of json) {
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+      } else if (ch === "\\") {
+        out += ch;
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+        out += ch;
+      } else if (ch === "\n") out += "\\n";
+      else if (ch === "\r") out += "\\r";
+      else if (ch === "\t") out += "\\t";
+      else out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
+}
+
+/** Parse a marker's JSON, retrying once with control-char repair. */
+function parseMarkerJson(json: string): { call?: unknown; args?: unknown } | null {
+  for (const candidate of [json, escapeControlCharsInStrings(json)]) {
+    try {
+      const j: unknown = JSON.parse(candidate);
+      if (j && typeof j === "object") return j as { call?: unknown; args?: unknown };
+    } catch {
+      /* try the repaired form */
+    }
+  }
+  return null;
+}
+
+/**
+ * Split a fallback response into prose + tool calls. LENIENT on purpose: the
+ * prompt teaches "one marker per line", but real models emit markers inline
+ * after prose, several concatenated on one line, and JSON spanning multiple
+ * lines (raw newlines inside `old_str`/`patch` strings). All of those parse —
+ * a capable model's tool use must render and execute exactly like an agent's,
+ * not fall through as raw text. Everything that isn't a valid `@@aka
+ * {"call":…}` object stays prose, so nothing is silently swallowed.
  */
 export function parseTextToolCalls(response: string): {
   prose: string;
   calls: ParsedCall[];
 } {
-  const proseLines: string[] = [];
   const calls: ParsedCall[] = [];
-  for (const line of response.split("\n")) {
-    const m = line.match(CALL_MARKER_RE);
-    if (m) {
-      try {
-        const j = JSON.parse(m[1]) as { call?: string; args?: unknown };
-        if (typeof j.call === "string" && j.call.length > 0) {
-          calls.push({
-            name: j.call,
-            argumentsJson: JSON.stringify(j.args ?? {}),
-          });
-          continue;
-        }
-      } catch {
-        // fall through — keep the line as prose
-      }
+  let prose = "";
+  let cursor = 0;
+  for (;;) {
+    const at = response.indexOf(CALL_MARKER, cursor);
+    if (at === -1) {
+      prose += response.slice(cursor);
+      break;
     }
-    proseLines.push(line);
+    // Find the payload `{` (allow spaces/tabs after the sentinel).
+    let braceAt = at + CALL_MARKER.length;
+    while (response[braceAt] === " " || response[braceAt] === "\t") braceAt += 1;
+    if (response[braceAt] !== "{") {
+      // A bare "@@aka" with no object — prose, keep going past it.
+      prose += response.slice(cursor, at + CALL_MARKER.length);
+      cursor = at + CALL_MARKER.length;
+      continue;
+    }
+    const scanned = scanJsonObject(response, braceAt);
+    if (!scanned) {
+      // Unbalanced to the end of the response (truncated output) — prose.
+      prose += response.slice(cursor);
+      break;
+    }
+    const j = parseMarkerJson(scanned.json);
+    if (j && typeof j.call === "string" && j.call.length > 0) {
+      prose += response.slice(cursor, at);
+      calls.push({ name: j.call, argumentsJson: JSON.stringify(j.args ?? {}) });
+    } else {
+      // Malformed or non-call object — keep the raw marker visible as prose.
+      prose += response.slice(cursor, scanned.end);
+    }
+    cursor = scanned.end;
   }
-  return { prose: proseLines.join("\n").trim(), calls };
+  return { prose: prose.trim(), calls };
 }
 
 /**
