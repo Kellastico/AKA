@@ -47,9 +47,12 @@ jobs:
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
+        # libpipewire-0.3-dev: required by the aka-tool shim's screenshot engine
+        # (xcap → libspa-sys) for Wayland capture. Without it the Linux leg dies
+        # at `cargo build` with "libpipewire-0.3 ... not found" (broke v1.5.x).
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libpipewire-0.3-dev
 
       - name: Build aka-runtime sidecar
         shell: bash
