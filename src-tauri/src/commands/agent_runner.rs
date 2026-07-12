@@ -406,6 +406,12 @@ pub async fn run_agent(
     // from the model classification + chosen posture. `None` for the None posture
     // (no subprocess) or when the dial is disabled — emits no AGENT_* env.
     posture: Option<AgentPosture>,
+    // Absolute path to a compiled artifact bundle's manifest.json (see
+    // `crate::compiler`). Handed to the agent as AKA_COMPILED_MANIFEST, the
+    // same path-via-env contract as AKA_TASK_FILE. `None` (or empty) emits
+    // nothing, keeping uncompiled runs byte-for-byte unchanged; agents that
+    // don't read it ignore the unknown env.
+    compiled_manifest: Option<String>,
 ) -> Result<(), AppError> {
     if project_path.trim().is_empty() {
         return Err(AppError::sandbox(project_path.clone()));
@@ -521,6 +527,14 @@ pub async fn run_agent(
     // (None / disabled / legacy) inserts nothing.
     for (k, v) in posture_env(posture.as_ref()) {
         env.insert(k.into(), v);
+    }
+
+    // Compiled-bundle handoff: a consuming agent walks the manifest's DAG and
+    // per-node artifacts instead of deriving orchestration at runtime.
+    if let Some(manifest) = compiled_manifest {
+        if !manifest.trim().is_empty() {
+            env.insert("AKA_COMPILED_MANIFEST".into(), manifest);
+        }
     }
 
     // Put the `aka-tool` shim on the agent's PATH so any agent that can run a

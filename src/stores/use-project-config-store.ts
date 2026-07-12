@@ -53,6 +53,8 @@ type ProjectConfigState = {
   setRuntimeApiKey: (apiKey: string | null) => Promise<void>;
   setAgent: (agent: Partial<ProjectConfig["agent"]>) => Promise<void>;
   setMode: (mode: string) => Promise<void>;
+  /** Persist the built-in loop's approval mode ("ask" | "acceptEdits" | "auto"). */
+  setApprovalMode: (mode: string) => Promise<void>;
   setVerifyCmd: (cmd: string) => Promise<void>;
   setMaxRetries: (n: number) => Promise<void>;
   /** advertise ↔ gapfill for AKA's built-in tool pantry. */
@@ -313,6 +315,13 @@ export const useProjectConfigStore = create<ProjectConfigState>((set, get) => ({
     const { projectPath, config } = get();
     if (!projectPath || !config) return;
     const next = { ...config, mode };
+    await persist(set, projectPath, next);
+  },
+
+  setApprovalMode: async (mode) => {
+    const { projectPath, config } = get();
+    if (!projectPath || !config) return;
+    const next = { ...config, approval_mode: mode };
     await persist(set, projectPath, next);
   },
 

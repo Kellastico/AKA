@@ -122,6 +122,14 @@ fn schema_for(name: &str) -> serde_json::Value {
             "properties": { "patch": { "type": "string", "description": "Unified diff to apply." } },
             "required": ["patch"]
         }),
+        "bash" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "Shell command to run in the project root." },
+                "timeout_secs": { "type": "integer", "description": "Max seconds to wait (default 120, max 600)." }
+            },
+            "required": ["command"]
+        }),
         _ => serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
@@ -402,27 +410,15 @@ pub async fn execute_builtin_tool(
                 .output()
                 .await;
             match output {
-                Ok(o) => {
-                    let mut text = String::new();
-                    text.push_str(&String::from_utf8_lossy(&o.stdout));
-                    if !o.stderr.is_empty() {
-                        if !text.is_empty() {
-                            text.push('\n');
-                        }
-                        text.push_str(&String::from_utf8_lossy(&o.stderr));
-                    }
-                    if text.len() > MAX_TOOL_BYTES {
-                        text.truncate(MAX_TOOL_BYTES);
-                        text.push_str("\n…[truncated]");
-                    }
-                    let code = o.status.code().unwrap_or(-1);
-                    if text.trim().is_empty() {
-                        text = format!("(no output — exit {code})");
-                    }
-                    // Diagnostics FINDING issues is a successful tool run; the
-                    // exit code is part of the payload, not a tool failure.
-                    Ok(ToolResult::ok(format!("[exit {code}]\n{text}")))
-                }
+                // Diagnostics FINDING issues is a successful tool run; the exit
+                // code is part of the payload, not a tool failure. Shaping
+                // (stream fold + byte cap + exit header) is the shared
+                // `bash_output` — one capped formatter for every exec-shaped tool.
+                Ok(o) => Ok(ToolResult::ok(bash_output(
+                    o.status.code().unwrap_or(-1),
+                    &String::from_utf8_lossy(&o.stdout),
+                    &String::from_utf8_lossy(&o.stderr),
+                ))),
                 Err(e) => Ok(ToolResult::err(format!("Could not run diagnostics: {e}"))),
             }
         }
@@ -437,8 +433,202 @@ pub async fn execute_builtin_tool(
              route this call to apply_str_replace / apply_diff / delete_file.",
             spec.name
         ))),
+        // Same structural rule for exec: `bash` runs only through the
+        // approval-gated `run_builtin_bash` command, never the read executor.
+        "bash" => Ok(ToolResult::err(
+            "'bash' executes via AKA's enforced exec command, not the read executor — \
+             route this call to run_builtin_bash."
+                .to_string(),
+        )),
         other => Ok(ToolResult::err(format!("Unknown tool '{other}'."))),
     }
+}
+
+// ---------- bash (approval-gated exec for the built-in loop) ----------
+
+/// Default / maximum wall-clock budget for one `bash` tool call.
+const BASH_DEFAULT_TIMEOUT_SECS: u64 = 120;
+const BASH_MAX_TIMEOUT_SECS: u64 = 600;
+
+/// Fold a finished command's streams into the model-facing payload: `[exit N]`
+/// header, stdout then stderr, truncated to [`MAX_TOOL_BYTES`]. Pure —
+/// directly unit-testable. Like `diagnostics`, a non-zero exit is a
+/// *successful tool run* whose payload carries the exit code.
+fn bash_output(code: i32, stdout: &str, stderr: &str) -> String {
+    let mut text = String::new();
+    text.push_str(stdout);
+    if !stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(stderr);
+    }
+    if text.len() > MAX_TOOL_BYTES {
+        // Truncate on a char boundary at or below the cap.
+        let mut cut = MAX_TOOL_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n…[truncated]");
+    }
+    if text.trim().is_empty() {
+        return format!("(no output — exit {code})");
+    }
+    format!("[exit {code}]\n{text}")
+}
+
+/// Run one model-requested shell command — the built-in loop's enforced exec
+/// chokepoint, mirroring `delete_file`'s shape: the *frontend* decides approval
+/// (per the user's approval mode or an explicit click) and passes `approved`;
+/// an unapproved call is denied with a visible `@@aka` card and nothing runs.
+/// Approved commands snapshot the tree first (a shell line can mutate anything,
+/// so it's undoable like an edit), then run via `sh -c` in the project root
+/// under a wall-clock timeout. Output is capped like every other tool result.
+#[tauri::command]
+pub async fn run_builtin_bash(
+    app: tauri::AppHandle,
+    sandbox: State<'_, SandboxState>,
+    checkpoints: State<'_, crate::commands::checkpoints::CheckpointState>,
+    project_path: String,
+    run_id: String,
+    command: String,
+    timeout_secs: Option<u64>,
+    approved: bool,
+) -> Result<ToolResult, AppError> {
+    use crate::tools::execution_witness::denial_card_line;
+
+    let cmd = command.trim().to_string();
+    if cmd.is_empty() {
+        return Ok(ToolResult::err("bash requires a non-empty 'command'."));
+    }
+
+    let sb = sandbox
+        .require()
+        .await
+        .map_err(|_| AppError::sandbox(project_path.clone()))?;
+    // The caller-supplied project root must be the active sandbox.
+    if crate::sandbox::assert_within_sandbox(std::path::Path::new(&project_path), &sb).is_err() {
+        return Err(AppError::sandbox(project_path.clone()));
+    }
+
+    if !approved {
+        crate::commands::agent_runner::emit_aka_card(
+            &app,
+            &run_id,
+            denial_card_line("run", "bash", &format!("not approved: {cmd}")),
+        );
+        return Ok(ToolResult::err(
+            "Denied: the user did not approve this command.",
+        ));
+    }
+
+    // A shell line can mutate anything in the project — snapshot first so the
+    // run is undoable, same contract as the enforced edit commands. Best-effort.
+    let label: String = cmd.chars().take(48).collect();
+    let _ = crate::commands::checkpoints::create_checkpoint_inner(
+        &app,
+        checkpoints.inner(),
+        &project_path,
+        &run_id,
+        &format!("Before bash: {label}"),
+        "step",
+    )
+    .await;
+
+    let budget = std::time::Duration::from_secs(
+        timeout_secs
+            .unwrap_or(BASH_DEFAULT_TIMEOUT_SECS)
+            .clamp(1, BASH_MAX_TIMEOUT_SECS),
+    );
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(&cmd)
+        .current_dir(&project_path)
+        // Same buffering trap as the Console/dev-server paths.
+        .env("PYTHONUNBUFFERED", "1")
+        // No terminal behind this pipe — a command that prompts must fail fast,
+        // not hang the loop waiting on input that can never come.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // Backstop: if the timeout drops the future below, the child dies with it.
+        .kill_on_drop(true);
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return Ok(ToolResult::err(format!("Could not run command: {e}"))),
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Stream both pipes with a hard per-stream byte cap instead of buffering
+    // the child's entire output (`.output()` would happily grow gigabytes for a
+    // runaway `yes`-style command before the 24 KB truncation ever ran). The
+    // reads run concurrently — draining one pipe at a time can deadlock when
+    // the child fills the other — and the moment either stream overflows its
+    // cap the child is killed: nobody will ever see those bytes, so there is
+    // no reason to keep paying for them until the timeout.
+    let run = async {
+        let out_fut = read_capped(stdout, MAX_TOOL_BYTES);
+        let err_fut = read_capped(stderr, MAX_TOOL_BYTES);
+        tokio::pin!(out_fut, err_fut);
+        let (mut out_res, mut err_res) = (None, None);
+        while out_res.is_none() || err_res.is_none() {
+            tokio::select! {
+                r = &mut out_fut, if out_res.is_none() => {
+                    if r.1 { let _ = child.start_kill(); }
+                    out_res = Some(r);
+                }
+                r = &mut err_fut, if err_res.is_none() => {
+                    if r.1 { let _ = child.start_kill(); }
+                    err_res = Some(r);
+                }
+            }
+        }
+        let (out, out_trunc) = out_res.unwrap_or_default();
+        let (err, err_trunc) = err_res.unwrap_or_default();
+        let status = child.wait().await;
+        (out, err, out_trunc || err_trunc, status)
+    };
+
+    match tokio::time::timeout(budget, run).await {
+        Err(_) => Ok(ToolResult::err(format!(
+            "Command timed out after {}s: {cmd}",
+            budget.as_secs()
+        ))),
+        Ok((out, err, truncated, status)) => {
+            let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
+            let mut text = bash_output(
+                code,
+                &String::from_utf8_lossy(&out),
+                &String::from_utf8_lossy(&err),
+            );
+            if truncated {
+                text.push_str("\n[output limit reached — the command was stopped early]");
+            }
+            Ok(ToolResult::ok(text))
+        }
+    }
+}
+
+/// Read a child pipe to EOF or to `cap + 1` bytes, whichever comes first.
+/// Returns the bytes plus whether the cap was exceeded (the +1 byte is the
+/// overflow detector; `bash_output` re-caps the combined text anyway). Memory
+/// stays bounded no matter how much the child writes.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: Option<R>,
+    cap: usize,
+) -> (Vec<u8>, bool) {
+    use tokio::io::AsyncReadExt;
+    let Some(reader) = reader else {
+        return (Vec::new(), false);
+    };
+    let mut buf = Vec::new();
+    let _ = reader.take(cap as u64 + 1).read_to_end(&mut buf).await;
+    let truncated = buf.len() > cap;
+    (buf, truncated)
 }
 
 /// Bounded recursive substring search. Skips `.git`/`node_modules`/dotdirs and
@@ -513,10 +703,11 @@ mod tests {
         assert!(names.contains(&"read_file".to_string()));
         assert!(names.contains(&"list_dir".to_string()));
         assert!(names.contains(&"search_files".to_string()));
-        // …and fs_write tools are NOT advertised at the read-only floor.
+        // …and fs_write/exec tools are NOT advertised at the read-only floor.
         assert!(!names.contains(&"str_replace".to_string()));
         assert!(!names.contains(&"delete_file".to_string()));
         assert!(!names.contains(&"apply_diff".to_string()));
+        assert!(!names.contains(&"bash".to_string()));
     }
 
     #[test]
@@ -530,6 +721,30 @@ mod tests {
         for w in ["str_replace", "apply_diff", "delete_file"] {
             assert!(names.contains(&w.to_string()), "expected {w} at Write phase");
         }
+        // Exec stays locked at the Write phase.
+        assert!(!names.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn exec_phase_unlocks_bash() {
+        let names: Vec<String> = tool_defs(ToolPhase::Exec)
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(names.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn bash_output_folds_streams_and_caps_size() {
+        // Non-zero exit is payload, not failure.
+        assert_eq!(bash_output(2, "out\n", "err\n"), "[exit 2]\nout\nerr\n");
+        // Empty output degrades to an exit-code note.
+        assert_eq!(bash_output(0, "", "  "), "(no output — exit 0)");
+        // Oversized output is truncated with a marker.
+        let big = "x".repeat(MAX_TOOL_BYTES * 2);
+        let out = bash_output(0, &big, "");
+        assert!(out.len() <= MAX_TOOL_BYTES + 64);
+        assert!(out.contains("…[truncated]"));
     }
 
     #[test]

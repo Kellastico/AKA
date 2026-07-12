@@ -1,6 +1,6 @@
 import { CheckCircle, Circle, Warning } from "@phosphor-icons/react";
 import { useChatStore } from "../../stores/use-chat-store";
-import { useAgentsStore } from "../../stores/use-agents-store";
+import { isBuiltinLoopAgent, useAgentsStore } from "../../stores/use-agents-store";
 import { useProjectsStore } from "../../stores/use-projects-store";
 import { useProjectConfigStore } from "../../stores/use-project-config-store";
 import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
@@ -35,16 +35,21 @@ export function SetupChecklist() {
   // is enough. The `installed` PATH-detection flag is ADVISORY only — the
   // backend resolves the bin via the login shell at launch — so a registered
   // agent with a bin is "ready" even if probing missed it on PATH.
+  // Execute + None is the built-in loop: no subprocess, so no bin required.
   const agentSelected = !!agent;
+  const isNoneAgent = isBuiltinLoopAgent(agent);
   const agentReady =
-    mode === "agent" ? agentSelected && !!agent.bin.trim() : agentSelected;
+    mode === "agent" && !isNoneAgent
+      ? agentSelected && !!agent.bin.trim()
+      : agentSelected;
   // The agent picker has a selection, but the *project* config is still empty
   // — this is the case that previously produced the "agent.bin is not
   // configured" backend crash. switchProject auto-heals legacy projects on
   // activation, so seeing this row means either heal hadn't run yet or the
-  // user genuinely has no global agent picked.
+  // user genuinely has no global agent picked. The built-in loop never reads
+  // the project's agent.bin, so None is exempt.
   const projectAgentBound =
-    mode !== "agent" || projectAgentBin.trim().length > 0;
+    mode !== "agent" || isNoneAgent || projectAgentBin.trim().length > 0;
 
   const items: Item[] = [
     {
@@ -100,7 +105,7 @@ export function SetupChecklist() {
   // agent.bin, and the existing "Pick a project folder" row already covers
   // the no-project case. Only push it when it can actually flag a real
   // problem, otherwise it just adds a confusing always-green row.
-  if (mode === "agent" && projectOk) {
+  if (mode === "agent" && !isNoneAgent && projectOk) {
     items.push({
       key: "project-agent",
       ok: projectAgentBound,

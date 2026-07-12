@@ -1,6 +1,7 @@
 pub mod agent_runner;
 pub mod builtin_tools;
 pub mod checkpoints;
+pub mod compiler;
 pub mod dev_server;
 pub mod diff;
 pub mod files;

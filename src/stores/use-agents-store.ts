@@ -51,8 +51,10 @@ const CUSTOM_AGENT: Agent = {
  * isn't a Python agent subprocess — AKA attaches nothing and relays the task
  * straight to the model (`bin: ""`, `llmOwnership: "aka"`). Unlike the blank
  * "Custom script" escape hatch, this is a deliberate, runnable end-state, not a
- * prompt to go configure a runner. It pairs with Chat Only / Edit modes;
- * Execute has no subprocess to dispatch.
+ * prompt to go configure a runner. It pairs with every mode: Chat Only / Edit
+ * talk to the model directly, Strategize runs the built-in read-only loop, and
+ * Execute runs the built-in full loop (edits + bash, approval-gated) with AKA
+ * itself driving the model.
  */
 export const NONE_AGENT: Agent = {
   id: "none",
@@ -66,6 +68,18 @@ export const NONE_AGENT: Agent = {
   llmOwnership: "aka",
   providesTools: [],
 };
+
+/**
+ * Whether AKA itself drives the model for this agent — the built-in tool loop —
+ * rather than spawning a subprocess. True ONLY for the None agent. This is the
+ * single predicate every "does this need a subprocess bin?" site must share:
+ * keying off the id (not `bin === ""`) is load-bearing, because the blank
+ * "Custom script" escape-hatch agent ALSO has an empty bin but is a misconfigured
+ * external runner that must be blocked, not silently routed into the exec loop.
+ */
+export function isBuiltinLoopAgent(agent: Agent | null | undefined): boolean {
+  return agent?.id === NONE_AGENT.id;
+}
 
 type AgentsState = {
   agents: Agent[];

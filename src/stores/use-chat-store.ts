@@ -7,7 +7,7 @@ import {
   runNativeToolLoop,
   runTextToolLoop,
 } from "../lib/builtin-loop";
-import { useAgentsStore } from "./use-agents-store";
+import { isBuiltinLoopAgent, useAgentsStore } from "./use-agents-store";
 import { useAttachmentsStore } from "./use-attachments-store";
 import { useProjectConfigStore } from "./use-project-config-store";
 import { useProjectsStore } from "./use-projects-store";
@@ -21,11 +21,14 @@ import { useDevServerStore } from "./use-dev-server-store";
 import { parserForAgent } from "../lib/agent-parsers";
 import {
   abortRuntime,
+  applyDiff,
+  applyStrReplace,
   asAppError,
   builtinToolDefs,
   callLlm,
   callLlmStream,
   callLlmTools,
+  deleteFile,
   executeBuiltinTool,
   listDir,
   readImageBase64,
@@ -41,6 +44,7 @@ import {
   createCheckpoint,
   restoreCheckpoint,
   checkpointsAvailable,
+  runBuiltinBash,
   runFileChanges,
   type AgentQuestion,
   type AgentStateEvent,
@@ -51,7 +55,18 @@ import {
   type ContentPart,
   type ContractMode,
   type AgentPosture,
+  type ToolPhase,
+  type ToolResult,
 } from "../lib/tauri/commands";
+import {
+  approvalGateFor,
+  approvalPrompt,
+  needsApproval,
+  parseApprovalMode,
+  parseToolArgs,
+  stringArg,
+  type ApprovalMode,
+} from "../lib/builtin-approvals";
 import { resolveVision } from "../lib/model-capabilities";
 import { classifyModel, postureToDial, type Posture } from "../lib/model-posture";
 import { buildTaskEnvelope } from "../features/08-context-engine/task-envelope";
@@ -259,6 +274,30 @@ const cancelledRuns = new Set<string>();
 // When the user ticks "auto-approve / remember", a later identical prompt in the
 // same session is answered automatically instead of surfacing a card again.
 const rememberedAnswers = new Map<string, Map<string, string>>();
+
+/**
+ * Pending approval waits for built-in loop runs, keyed by session (== run) id.
+ * When the built-in Execute loop pauses on a gated tool call, it parks a
+ * resolver here and raises a `pendingQuestion`; `answerQuestion` resolves it
+ * (instead of typing into an agent PTY), and `stop()` resolves it with "n" so
+ * a cancelled run never leaves the loop hanging on a dead promise.
+ */
+const builtinApprovalResolvers = new Map<string, (text: string) => void>();
+
+/**
+ * Release every module-level resource keyed to a session that's being torn down
+ * (deleted), so nothing leaks for the app's lifetime. Call from the session
+ * delete path. Resolves any parked approval wait as "n" first so a mid-run
+ * delete can't strand the loop's promise, then drops the remembered-answers and
+ * cancelled-run bookkeeping. Idempotent.
+ */
+export function forgetSession(sessionId: string): void {
+  builtinApprovalResolvers.get(sessionId)?.("n");
+  builtinApprovalResolvers.delete(sessionId);
+  rememberedAnswers.delete(sessionId);
+  cancelledRuns.delete(sessionId);
+  sessionGen.delete(sessionId);
+}
 
 /** Absolute path of the project that owns `sessionId` (empty if not found). */
 function projectPathForSession(sessionId: string): string {
@@ -513,7 +552,7 @@ export type ChatMode = "ask" | "edit" | "agent";
 export const CHAT_MODES: { id: ChatMode; label: string; hint: string }[] = [
   { id: "ask", label: "Chat Only", hint: "Pure conversation — nothing touches your repo" },
   { id: "edit", label: "Strategize", hint: "Read-only tools — the model explores your project and plans; nothing is changed" },
-  { id: "agent", label: "Execute", hint: "Dispatch the agent to run the task end-to-end" },
+  { id: "agent", label: "Execute", hint: "Run the task end-to-end — your agent, or AKA's built-in loop (edits + shell) with None" },
 ];
 
 type ChatState = {
@@ -524,6 +563,14 @@ type ChatState = {
    * back to "agent" for any unrecognized value (older configs, etc.).
    */
   hydrateMode: (mode: string) => void;
+  /**
+   * Approval policy for the built-in Execute loop (None agent + Execute):
+   * "ask" pauses on every file edit and shell command, "acceptEdits" only on
+   * shell commands, "auto" never. Persisted per project like `mode`.
+   */
+  approvalMode: ApprovalMode;
+  setApprovalMode: (mode: ApprovalMode) => void;
+  hydrateApprovalMode: (mode: string) => void;
   inputText: string;
   setInputText: (t: string) => void;
   /**
@@ -583,10 +630,11 @@ type ChatState = {
   /** Stop a session's run. Defaults to the active session when no id is given. */
   stop: (sessionId?: string) => void;
   /**
-   * Answer the interactive prompt a session's agent is waiting on. Types `text`
-   * into the agent's PTY, clears the pending question, and (when `remember`) auto-
-   * answers later identical prompts in that session. Approve = "y", Reject = "n",
-   * or any free-text reply.
+   * Answer the interactive prompt a session's agent is waiting on. For an agent
+   * run, types `text` into the agent's PTY; for a built-in loop run paused on a
+   * tool approval, resolves the in-process wait. Clears the pending question and
+   * (when `remember`) auto-answers later identical prompts in that session.
+   * Approve = "y", Reject = "n", or any free-text reply.
    */
   answerQuestion: (sessionId: string, text: string, remember?: boolean) => void;
   /** Suspend a running agent (SIGSTOP). Defaults to the active session. */
@@ -621,6 +669,20 @@ const STRATEGIZE_SYSTEM = [
   "Deliver: a clear explanation and, when asked for work, a concrete step-by-step plan the user (or an agent) can execute.",
 ].join("\n");
 
+/**
+ * System prompt for the built-in Execute loop (None agent + Execute mode) —
+ * full toolset: read/search/diagnostics plus file edits and `bash`. Honest
+ * about the approval gate: a tool result saying the user declined is a signal
+ * to adapt, not to retry the same call.
+ */
+const EXECUTE_SYSTEM = [
+  "You are a coding agent working inside the user's project.",
+  "You have tools to read files, list directories, search, run the project's diagnostics, edit files (str_replace / apply_diff / delete_file), and run shell commands (bash).",
+  "Read the relevant code BEFORE editing it. Prefer small, anchored str_replace edits.",
+  "Every edit and shell command is checkpointed and may pause for the user's approval. If a result says the user declined, do not repeat the same call — adjust your approach or finish with what you know.",
+  "When the task is done, verify it (diagnostics or a quick bash check) and summarize exactly what you changed.",
+].join("\n");
+
 export const useChatStore = create<ChatState>((set, get) => ({
   // First-time users land in Ask mode — a real LLM conversation. Agent mode
   // spawns the subprocess agent (Aider, OpenCode, …) and runs autonomously,
@@ -632,6 +694,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   hydrateMode: (mode) => {
     set({ mode: (KNOWN_MODES as string[]).includes(mode) ? (mode as ChatMode) : "ask" });
+  },
+  approvalMode: "ask",
+  setApprovalMode: (approvalMode) => {
+    set({ approvalMode });
+    void useProjectConfigStore.getState().setApprovalMode(approvalMode);
+  },
+  hydrateApprovalMode: (mode) => {
+    set({ approvalMode: parseApprovalMode(mode) });
   },
   inputText: "",
   setInputText: (inputText) => set({ inputText }),
@@ -688,30 +758,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const rt = useRuntimeStore.getState();
     const ag = useAgentsStore.getState();
     const agent = ag.agents.find((a) => a.id === ag.selectedAgentId);
-    if (
-      !rt.active ||
-      !rt.healthy ||
-      !rt.selectedModelId ||
-      !agent ||
-      // Agent mode needs a bin to run, but we no longer block on the `installed`
-      // detection flag: the user registered this agent, and the backend resolves
-      // the binary via the login shell at spawn. If it genuinely can't be found,
-      // the run surfaces a clear "command not found" AgentCrash rather than a
-      // silent, un-actionable refusal here.
-      (mode === "agent" && !agent.bin.trim())
-    ) {
+    if (!rt.active || !rt.healthy || !rt.selectedModelId || !agent) {
       return;
     }
-
-    // Pre-flight #2: the *project's* config must carry an agent.bin (the
-    // backend reads it from disk per run). Globals can be green while the
-    // project's .äkä/config.json is still empty — the gap that produced the
-    // "agent.bin is not configured" crash and the "no agent saved" dead-end.
-    // Rather than refuse, the agent branch below mirrors the selected agent
-    // into the project config just before spawning, so a valid selection always
-    // launches even if the on-load auto-heal lost a startup race. We only bail
-    // when the selected agent has no bin to mirror (the blank escape hatch).
-    if (mode === "agent" && !agent.bin.trim()) {
+    // The None agent needs no bin — Execute + None routes to the built-in loop
+    // below (AKA drives the model with the full phase-gated toolset). An
+    // EXTERNAL agent in Execute mode still needs a bin to spawn; refuse that
+    // case here (the SetupChecklist explains it) rather than crash the backend.
+    if (mode === "agent" && !isBuiltinLoopAgent(agent) && !agent.bin.trim()) {
       return;
     }
 
@@ -871,16 +925,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    if (mode === "agent") {
-      // The pre-flight above guaranteed a selected agent; this guard just
-      // narrows the type for the parser below.
-      if (!agent) {
-        clearRun();
-        return;
-      }
-      // Agent mode: spawn the agent subprocess and live-stream its stdout
-      // into a placeholder assistant message so the user sees progress as
-      // it happens, not after a long silence.
+    if (mode === "agent" && !isBuiltinLoopAgent(agent)) {
+      // External agent: spawn the subprocess and live-stream its stdout into a
+      // placeholder assistant message so the user sees progress as it happens,
+      // not after a long silence. (Execute with the "None" agent falls through
+      // to the built-in loop branch instead.) The preflight guaranteed a bin.
       void (async () => {
         const attachmentCtx = await resolveAttachments();
         // Wrap the raw prompt in the Task Envelope (feature 08): objective +
@@ -1531,12 +1580,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    if (mode === "edit" && agent && !agent.bin.trim()) {
-      // Strategize + None: AKA drives the model itself through the built-in
-      // READ-ONLY tool loop (read/list/search/diagnostics — phase-gated, so no
-      // write or exec tool is even advertised). Native tool-calling when the
-      // model supports it, the @@aka text protocol otherwise. Tool activity
-      // renders as the same timeline cards an agent run produces.
+    if ((mode === "edit" || mode === "agent") && isBuiltinLoopAgent(agent)) {
+      // The built-in loop — AKA drives the model itself (the "None" agent).
+      // Strategize runs the READ-ONLY floor (read/list/search/diagnostics —
+      // phase-gated, so no write or exec tool is even advertised). Execute
+      // unlocks the full phase: file edits + bash, each routed through AKA's
+      // enforced commands and gated by the user's approval mode. Native
+      // tool-calling when the model supports it, the @@aka text protocol
+      // otherwise. Tool activity renders as the same timeline cards an agent
+      // run produces.
+      const phase: ToolPhase = mode === "agent" ? "exec" : "readonly";
+      const approvalMode: ApprovalMode = get().approvalMode;
       void (async () => {
         const attachmentCtx = await resolveAttachments();
         if (genOf(runKey) !== myGen) return;
@@ -1574,7 +1628,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         let currentToolId: string | null = null;
         const store = () => useMessagesStore.getState();
         const kindOf = (name: string): ToolKind =>
-          name === "read_file" ? "read" : name === "diagnostics" ? "run" : "search";
+          name === "read_file"
+            ? "read"
+            : name === "diagnostics" || name === "bash"
+              ? "run"
+              : approvalGateFor(name) === "edit"
+                ? "write"
+                : "search";
         const hooks = {
           // Keep the context meter honest during the loop: the real prompt
           // (tool results included) is invisible to the transcript estimate,
@@ -1603,9 +1663,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (genOf(runKey) !== myGen) return;
             let path: string | undefined;
             try {
-              const args = JSON.parse(call.argumentsJson) as { path?: string; query?: string };
+              const args = JSON.parse(call.argumentsJson) as {
+                path?: string;
+                query?: string;
+                command?: string;
+              };
               path = args.path;
               if (!path && args.query) path = `"${args.query}"`;
+              if (!path && args.command) path = args.command;
             } catch {
               /* unparseable args — card still renders by name */
             }
@@ -1649,11 +1714,124 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
 
         try {
-          const tools = await builtinToolDefs("readonly");
+          const tools = await builtinToolDefs(phase);
           const native = classifyModel(modelId).nativeToolCalling;
-          const executeTool = async (name: string, argumentsJson: string) => {
+
+          // Execute runs mutate the tree — take the same "Before run" baseline
+          // an agent run gets, so Restart / "Reject & roll back" work here too.
+          if (phase === "exec") {
+            void ensureCheckpointListeners();
+            set((st) => ({
+              lastTaskBySession: { ...st.lastTaskBySession, [runKey]: text },
+            }));
+            try {
+              const available = await checkpointsAvailable(projectPath);
+              set((st) => ({
+                checkpointsAvailableBySession: {
+                  ...st.checkpointsAvailableBySession,
+                  [runKey]: available,
+                },
+              }));
+              if (available) await createCheckpoint(projectPath, runKey, "Before run", "prerun");
+            } catch {
+              /* checkpoints are best-effort — never block the run */
+            }
+          }
+
+          // Pause the loop on a gated call until the user answers (or the
+          // approval mode auto-approves). Identical prompts remembered via the
+          // card's checkbox short-circuit without pausing. `stop()` resolves a
+          // parked wait with "n" so cancellation never strands the promise.
+          const requestApproval = (prompt: string): Promise<string> =>
+            new Promise((resolve) => {
+              const remembered = rememberedAnswers.get(runKey)?.get(prompt);
+              if (remembered !== undefined) {
+                resolve(remembered);
+                return;
+              }
+              builtinApprovalResolvers.set(runKey, (answer) => {
+                builtinApprovalResolvers.delete(runKey);
+                resolve(answer);
+              });
+              setPendingQuestion({ runId: runKey, prompt, kind: "confirm" });
+            });
+
+          const executeTool = async (
+            name: string,
+            argumentsJson: string,
+          ): Promise<ToolResult> => {
             bailIfStale();
-            return executeBuiltinTool(name, argumentsJson, projectPath, "readonly");
+            // The read-only floor: exactly the pre-existing Strategize path.
+            if (phase === "readonly") {
+              return executeBuiltinTool(name, argumentsJson, projectPath, "readonly");
+            }
+
+            // Parse the raw arguments ONCE — reused for the approval prompt and
+            // the enforced-command dispatch below.
+            const args = parseToolArgs(argumentsJson);
+            const s = (k: string) => stringArg(args, k);
+
+            const gate = approvalGateFor(name);
+            if (gate && needsApproval(approvalMode, gate)) {
+              const answer = (await requestApproval(approvalPrompt(name, args))).trim();
+              bailIfStale();
+              if (controller.signal.aborted) return { ok: false, content: "Cancelled." };
+              if (!/^y/i.test(answer)) {
+                // A free-text reply is guidance, not just a "no" — hand the
+                // model the user's words so it can adapt.
+                const note = /^n$/i.test(answer) || answer === "" ? "" : ` They said: ${answer}`;
+                return {
+                  ok: false,
+                  content: `The user declined this action.${note} Do not retry the same call — adjust your approach.`,
+                };
+              }
+            }
+
+            // Gated tools run through AKA's enforced commands (scope +
+            // checkpoint + approval + witness baked in); everything else goes
+            // through the read chokepoint at this phase.
+            try {
+              switch (name) {
+                case "bash":
+                  return await runBuiltinBash(
+                    projectPath,
+                    runKey,
+                    s("command"),
+                    typeof args.timeout_secs === "number" ? args.timeout_secs : null,
+                    true,
+                  );
+                case "str_replace": {
+                  const r = await applyStrReplace(projectPath, runKey, {
+                    path: s("path"),
+                    oldStr: s("old_str"),
+                    newStr: s("new_str"),
+                  });
+                  return {
+                    ok: true,
+                    content: `Edited ${s("path")} (+${r.linesAdded}/−${r.linesRemoved} lines).`,
+                  };
+                }
+                case "apply_diff":
+                  await applyDiff(s("patch"), projectPath, runKey);
+                  return { ok: true, content: "Patch applied." };
+                case "delete_file":
+                  await deleteFile(projectPath, runKey, s("path"), true);
+                  return { ok: true, content: `Deleted ${s("path")}.` };
+                default:
+                  return await executeBuiltinTool(name, argumentsJson, projectPath, phase);
+              }
+            } catch (err) {
+              // Enforced-command rejections (bad anchor, out of scope, patch
+              // failure) come back as model-readable errors, not loop crashes.
+              // EditConflict carries `reason`; apply_diff rejects with a plain
+              // string; anything else degrades to its JSON form.
+              const raw = err as { reason?: string; message?: string } | string | null;
+              const content =
+                typeof raw === "string"
+                  ? raw
+                  : raw?.reason ?? raw?.message ?? JSON.stringify(err);
+              return { ok: false, content: content || "Tool call failed." };
+            }
           };
 
           // Ground the model in the project BEFORE the first turn: name, root,
@@ -1668,7 +1846,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           } catch {
             /* identity line still grounds the model */
           }
-          const system = `${STRATEGIZE_SYSTEM}\n\n${projectContextBlock(projectPath, listing)}`;
+          const system = `${phase === "exec" ? EXECUTE_SYSTEM : STRATEGIZE_SYSTEM}\n\n${projectContextBlock(projectPath, listing)}`;
+          // Execute runs do real multi-step work (read → edit → verify), so
+          // they get a bigger turn budget than a read-only planning pass.
+          const maxSteps = phase === "exec" ? 32 : undefined;
 
           const result = native
             ? await runNativeToolLoop({
@@ -1681,6 +1862,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 },
                 executeTool,
                 hooks,
+                maxSteps,
                 signal: controller.signal,
               })
             : await runTextToolLoop({
@@ -1693,6 +1875,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 },
                 executeTool,
                 hooks,
+                maxSteps,
                 signal: controller.signal,
               });
 
@@ -1719,11 +1902,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ownerSessionId,
           );
         } finally {
+          // Never leave an approval wait parked for a run that's over.
+          builtinApprovalResolvers.get(runKey)?.("n");
           if (genOf(runKey) === myGen) {
             finalizePlaceholder(placeholderId, "abandoned", ownerSessionId);
             useMessagesStore.getState().closeRunningTools(ownerSessionId);
             clearPlaceholderIf(placeholderId);
             clearRun();
+            // Execute runs change files on disk — roll any open preview pane
+            // forward, same as the external-agent path.
+            if (phase === "exec") useWorkspaceStore.getState().bumpPreviewReload();
           }
         }
       })();
@@ -2020,6 +2208,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     bumpGen(targetSid);
     cancelledRuns.add(targetSid);
 
+    // A built-in loop parked on an approval wait must be released (as "no"),
+    // or the stopped run's promise would hang forever.
+    builtinApprovalResolvers.get(targetSid)?.("n");
+
     // Drop the session from the running set. Its tokensPerSecBySession entry is
     // left at its last value so the meter still reads after a stop.
     set((st) => {
@@ -2051,8 +2243,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   answerQuestion: (sessionId, text, remember) => {
     const run = get().runs[sessionId];
     const q = run?.pendingQuestion;
-    // Type the reply into the agent's PTY (run id == session id).
-    void answerAgent(sessionId, text);
+    // A built-in loop run waits on an in-process resolver, not a PTY: hand it
+    // the answer directly. Agent runs get the reply typed into their PTY
+    // (run id == session id).
+    const resolver = builtinApprovalResolvers.get(sessionId);
+    if (resolver) {
+      resolver(text);
+    } else {
+      void answerAgent(sessionId, text);
+    }
     // Remember the answer for identical future prompts in this session.
     if (remember && q) {
       let m = rememberedAnswers.get(sessionId);

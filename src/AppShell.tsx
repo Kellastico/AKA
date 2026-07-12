@@ -179,6 +179,13 @@ export function AppShell() {
     useChatStore.getState().hydrateMode(configMode);
   }, [configMode]);
 
+  // Approval-mode hydrate (built-in Execute loop) — same pattern as mode.
+  const configApprovalMode = config?.approval_mode;
+  useEffect(() => {
+    if (!configApprovalMode) return;
+    useChatStore.getState().hydrateApprovalMode(configApprovalMode);
+  }, [configApprovalMode]);
+
   // Per-session agent + model restore. When the user switches sessions, look
   // up that session's saved meta and apply it to the pickers. New sessions
   // (no meta) silently inherit the current selection — i.e. "last-used"

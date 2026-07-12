@@ -236,12 +236,18 @@ fn extract_diff_paths(patch: &str) -> Vec<String> {
 
 /// Validate every path in `patch` against the active sandbox, then apply the
 /// patch with `patch -p1`. The entire patch is rejected if any path escapes
-/// the sandbox — no hunks are applied in that case.
+/// the sandbox — no hunks are applied in that case. When `run_id` is given
+/// (the built-in loop passes its run key), the working tree is snapshotted
+/// first — the same checkpoint-before-write contract as `apply_str_replace` —
+/// so a mid-run patch is undoable on its own, not only via the run baseline.
 #[tauri::command]
 pub async fn apply_diff(
+    app: AppHandle,
     state: State<'_, SandboxState>,
+    checkpoints: State<'_, crate::commands::checkpoints::CheckpointState>,
     patch: String,
     project_path: String,
+    run_id: Option<String>,
 ) -> Result<(), String> {
     let sandbox = state
         .require()
@@ -285,6 +291,21 @@ pub async fn apply_diff(
     tokio::fs::write(&tmp_file, patch.as_bytes())
         .await
         .map_err(|e| format!("write patch: {e}"))?;
+
+    // Snapshot before the patch lands so it's undoable on its own (best-effort,
+    // agnostic) — only when a run owns this edit. A bare editor-driven apply
+    // (no run_id) keeps the historical no-checkpoint behaviour.
+    if let Some(run_id) = run_id.as_deref().filter(|r| !r.trim().is_empty()) {
+        let _ = crate::commands::checkpoints::create_checkpoint_inner(
+            &app,
+            checkpoints.inner(),
+            &project_path,
+            run_id,
+            "Before patch",
+            "step",
+        )
+        .await;
+    }
 
     let status = tokio::process::Command::new("patch")
         .arg("-p1")

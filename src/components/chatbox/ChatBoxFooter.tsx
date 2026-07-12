@@ -2,13 +2,14 @@ import { ArrowUp, Pause, Play, Stop } from "@phosphor-icons/react";
 import { ModelPicker } from "./ModelPicker";
 import { AgentPicker } from "./AgentPicker";
 import { ModePicker } from "./ModePicker";
+import { ApprovalPicker } from "./ApprovalPicker";
 import { AttachButton } from "./AttachButton";
 import {
   useActiveSessionRunState,
   useChatStore,
 } from "../../stores/use-chat-store";
 import { useAttachmentsStore } from "../../stores/use-attachments-store";
-import { NONE_AGENT, useAgentsStore } from "../../stores/use-agents-store";
+import { isBuiltinLoopAgent, useAgentsStore } from "../../stores/use-agents-store";
 import { useProjectsStore } from "../../stores/use-projects-store";
 import { useProjectConfigStore } from "../../stores/use-project-config-store";
 import { useRuntimeStore } from "../../features/01-llm-provider/use-runtime-store";
@@ -50,14 +51,17 @@ export function ChatBoxFooter({ compact }: { compact: boolean }) {
   );
   const contextOverflow = useTokenCounterStore((s) => s.status === "over");
 
-  const needsAgentInstalled = mode === "agent";
+  // Execute + None is the built-in loop — AKA drives the model itself, no
+  // subprocess to install or bind, so the agent-mode guards don't apply.
+  const isNoneAgent = isBuiltinLoopAgent(agent);
+  const needsAgentInstalled = mode === "agent" && !isNoneAgent;
   const agentReady = !!agent && (!needsAgentInstalled || agent.installed);
   // In agent mode the backend reads `.äkä/config.json` and refuses to spawn
   // when agent.bin is empty. Disable Send (instead of letting it crash) so
   // the user sees the SetupChecklist row and re-picks an agent — selecting
   // one from the picker mirrors into the project config.
   const projectAgentBound =
-    mode !== "agent" || projectAgentBin.trim().length > 0;
+    mode !== "agent" || isNoneAgent || projectAgentBin.trim().length > 0;
 
   const canSend =
     (inputText.trim().length > 0 || hasAttachments) &&
@@ -81,13 +85,11 @@ export function ChatBoxFooter({ compact }: { compact: boolean }) {
             ? "Context limit reached. Swap your model or start a new session."
             : !agent
               ? "Pick an agent"
-              : agent.id === NONE_AGENT.id && mode === "agent"
-                ? "“None” has no agent to run — switch to Chat or Edit mode"
-                : needsAgentInstalled && !agent.installed
-                  ? `${agent.name} isn't installed`
-                  : !projectAgentBound
-                    ? "Re-pick the agent — this project's config is empty"
-                    : "Send";
+              : needsAgentInstalled && !agent.installed
+                ? `${agent.name} isn't installed`
+                : !projectAgentBound
+                  ? "Re-pick the agent — this project's config is empty"
+                  : "Send";
 
   return (
     <>
@@ -96,6 +98,9 @@ export function ChatBoxFooter({ compact }: { compact: boolean }) {
         <ModelPicker compact={compact} />
         <AgentPicker compact={compact} />
         <ModePicker compact={compact} />
+        {/* Approval policy only applies to the built-in Execute loop —
+            external agents run their own prompts, Strategize never writes. */}
+        {mode === "agent" && isNoneAgent && <ApprovalPicker compact={compact} />}
         <AttachButton compact={compact} />
         {/* Tools indicator intentionally hidden for now — see ToolsIndicator.tsx
             (kept for a future treatment). Tools stay wired via tool_manifest. */}

@@ -1,4 +1,5 @@
 mod commands;
+pub mod compiler;
 mod error;
 mod hardware;
 mod path_env;
@@ -54,6 +55,7 @@ pub fn run() {
             commands::agent_runner::detect_agents,
             commands::agent_runner::recheck_agents,
             commands::probe::probe_agent_capabilities,
+            commands::compiler::compile_task_spec,
             commands::checkpoints::checkpoints_available,
             commands::checkpoints::create_checkpoint,
             commands::checkpoints::list_checkpoints,
@@ -68,6 +70,7 @@ pub fn run() {
             commands::llm::call_llm_stream,
             commands::builtin_tools::builtin_tool_defs,
             commands::builtin_tools::execute_builtin_tool,
+            commands::builtin_tools::run_builtin_bash,
             commands::builtin_tools::advance_phase,
             sandbox::delete_file,
             commands::llm::stop_llm_stream,

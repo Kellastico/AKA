@@ -35,6 +35,10 @@ fn default_tools_mode() -> String {
     "advertise".to_string()
 }
 
+fn default_approval_mode() -> String {
+    "ask".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeBlock {
     #[serde(default = "default_base_url")]
@@ -221,6 +225,12 @@ pub struct ProjectConfig {
     pub agent: AgentBlock,
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// Approval policy for the built-in Execute loop: `"ask"` (every file edit
+    /// and shell command pauses for approval), `"acceptEdits"` (edits run
+    /// automatically, shell commands still ask), or `"auto"` (nothing asks).
+    /// Enforcement lives in the loop's dispatcher; this only persists the pick.
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     #[serde(default)]
@@ -246,6 +256,7 @@ impl Default for ProjectConfig {
             runtime: RuntimeBlock::default(),
             agent: AgentBlock::default(),
             mode: DEFAULT_MODE.to_string(),
+            approval_mode: default_approval_mode(),
             max_retries: DEFAULT_MAX_RETRIES,
             sandbox: SandboxBlock::default(),
             dev_server: DevServerBlock::default(),

@@ -138,7 +138,7 @@ function AssistantMessage({ message }: { message: Message }) {
         <div className="w-full">
           <button
             onClick={() => setThinkOpen((v) => !v)}
-            className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11px] text-ink/40 hover:bg-ink/5 hover:text-ink/60"
+            className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-ink/40 hover:bg-ink/5 hover:text-ink/60"
           >
             <Brain
               size={12}
@@ -161,7 +161,7 @@ function AssistantMessage({ message }: { message: Message }) {
                 "mt-1 rounded-xl px-3 py-2.5",
                 "border border-white/20 bg-white/12 backdrop-blur-xl",
                 "shadow-[0_4px_20px_rgba(255,255,255,0.04),inset_0_1px_0_rgba(255,255,255,0.15)]",
-                "text-[11px] leading-relaxed text-ink/75",
+                "text-xs leading-relaxed text-ink/75",
                 "whitespace-pre-wrap [overflow-wrap:anywhere]",
               ].join(" ")}
             >
@@ -177,7 +177,7 @@ function AssistantMessage({ message }: { message: Message }) {
       )}
       {isPending && <ThinkingBubble since={message.pendingSince!} />}
       {message.content && (
-        <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-[13px] leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
+        <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-sm leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
           <Markdown>{message.content}</Markdown>
         </div>
       )}
@@ -405,7 +405,7 @@ function MetaRow({ message }: { message: Message }) {
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-x-1.5 text-[10px] text-ink/40">
+    <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-ink/40">
       {parts.map((p, i) => (
         <span key={i} className="inline-flex items-center gap-1.5">
           {i > 0 && <span className="text-ink/25">·</span>}

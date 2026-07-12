@@ -330,6 +330,11 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     const projectPath = get().projects.find((p) => p.id === projectId)?.path;
     if (projectPath) void clearCheckpoints(projectPath, sessionId);
 
+    // Release the chat store's module-level per-session bookkeeping (remembered
+    // approvals, parked resolvers, generation counter) so it can't leak for the
+    // app's lifetime. Dynamic import to avoid a top-level store import cycle.
+    void import("./use-chat-store").then((m) => m.forgetSession(sessionId));
+
     const projects = get().projects.map((p) =>
       p.id === projectId
         ? { ...p, sessions: p.sessions.filter((s) => s.id !== sessionId) }

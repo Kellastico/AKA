@@ -347,6 +347,11 @@ export type ProjectConfig = {
   runtime: RuntimeBlock;
   agent: AgentBlock;
   mode: string;
+  /**
+   * Approval policy for the built-in Execute loop — "ask" | "acceptEdits" |
+   * "auto". Persisted here; interpreted by `lib/builtin-approvals.ts`.
+   */
+  approval_mode: string;
   max_retries: number;
   sandbox: SandboxBlock;
   dev_server: DevServerBlock;
@@ -377,6 +382,7 @@ export const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
     dry_run_flags: [],
   },
   mode: "agent",
+  approval_mode: "ask",
   max_retries: 3,
   sandbox: {
     project_path: "",
@@ -494,6 +500,13 @@ export async function runAgent(
    * agent that doesn't honor the dial ignores it regardless (no regression).
    */
   posture?: AgentPosture,
+  /**
+   * Absolute path to a compiled bundle's `manifest.json` (from
+   * {@link compileTaskSpec}), handed to the agent as `AKA_COMPILED_MANIFEST`.
+   * Omit for uncompiled runs — the backend then emits no env and the run is
+   * byte-for-byte what it was before the compiler existed.
+   */
+  compiledManifest?: string,
 ): Promise<void> {
   return invoke("run_agent", {
     task,
@@ -505,7 +518,44 @@ export async function runAgent(
     imagePaths: imagePaths ?? null,
     attachments: attachments ?? null,
     posture: posture ?? null,
+    compiledManifest: compiledManifest ?? null,
   });
+}
+
+/** One node's outcome from {@link compileTaskSpec}. */
+export type CompiledNode = {
+  id: string;
+  /** Content hash addressing this node's artifacts in `.äkä/compiled/.nodes/`. */
+  hash: string;
+  /** "cached" = artifacts already existed; "generated" = (re)built this compile. */
+  status: "cached" | "generated";
+};
+
+/** Result of compiling a task spec into an artifact bundle. */
+export type CompileOutcome = {
+  bundleHash: string;
+  bundleDir: string;
+  /** Hand this to {@link runAgent} as `compiledManifest`. */
+  manifestPath: string;
+  /** True when the identical spec+descriptor was already compiled — nothing was written. */
+  cacheHit: boolean;
+  nodes: CompiledNode[];
+  warnings: string[];
+  /** Superseded bundles + orphaned node artifacts removed by this compile's retention pass. */
+  pruned: number;
+};
+
+/**
+ * Compile a task/node spec (`.äkä/specs/*.json`) against its target descriptor
+ * (`.äkä/targets/<name>.json`) into a content-addressed artifact bundle under
+ * `.äkä/compiled/`. Fails with a friendly aggregated message when the spec is
+ * malformed — at compile time, never at agent runtime.
+ */
+export async function compileTaskSpec(
+  projectPath: string,
+  specPath: string,
+): Promise<CompileOutcome> {
+  return invoke<CompileOutcome>("compile_task_spec", { projectPath, specPath });
 }
 
 /**
@@ -777,13 +827,16 @@ export async function requestPathAccess(path: string): Promise<boolean> {
 /**
  * Apply a unified-diff patch within the active sandbox. Every path in the
  * patch is validated before any hunk is applied; the patch is rejected
- * outright if any path escapes the sandbox.
+ * outright if any path escapes the sandbox. Pass `runId` (the built-in loop's
+ * run key) to snapshot the tree first — same checkpoint-before-write contract
+ * as `applyStrReplace`; omit it for an editor-driven apply that shouldn't snap.
  */
 export async function applyDiff(
   patch: string,
   projectPath: string,
+  runId?: string,
 ): Promise<void> {
-  return invoke("apply_diff", { patch, projectPath });
+  return invoke("apply_diff", { patch, projectPath, runId: runId ?? null });
 }
 
 /** An anchored string-replace edit request. */
@@ -818,6 +871,45 @@ export async function applyStrReplace(
   req: StrReplaceReq,
 ): Promise<EditResult> {
   return invoke<EditResult>("apply_str_replace", { projectPath, runId, req });
+}
+
+/**
+ * Delete a file — enforced from outside the agent. The path must resolve inside
+ * the sandbox AND the delete must be explicitly approved (`approved` reflects
+ * the user's approval-mode decision); unapproved or out-of-scope deletes are
+ * denied with a visible @@aka card. Approved deletes checkpoint first.
+ */
+export async function deleteFile(
+  projectPath: string,
+  runId: string,
+  path: string,
+  approved: boolean,
+): Promise<void> {
+  return invoke("delete_file", { projectPath, runId, path, approved });
+}
+
+/**
+ * Run one model-requested shell command through the built-in loop's enforced
+ * exec chokepoint. `approved` carries the frontend's approval decision (auto
+ * mode or an explicit user click); unapproved calls are denied host-side and
+ * come back as `{ ok: false }`. Approved commands checkpoint the tree first,
+ * run via `sh -c` in the project root, and are output-capped + time-boxed.
+ */
+export async function runBuiltinBash(
+  projectPath: string,
+  runId: string,
+  command: string,
+  timeoutSecs: number | null,
+  approved: boolean,
+): Promise<ToolResult> {
+  if (!hasTauri()) return { ok: false, content: "No Tauri runtime." };
+  return invoke<ToolResult>("run_builtin_bash", {
+    projectPath,
+    runId,
+    command,
+    timeoutSecs,
+    approved,
+  });
 }
 
 /**

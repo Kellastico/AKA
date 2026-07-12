@@ -189,6 +189,20 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             shim: false,
             native: true,
         },
+        ToolSpec {
+            name: "bash",
+            usage: "bash {command, timeout_secs?} — run a shell command in the project root \
+                    (approval-gated)",
+            category: "exec",
+            model_desc: "Run a shell command in the project root and return its output.",
+            // Arbitrary process execution — the deny-by-default floor. Only
+            // advertised at the Exec phase, and every run goes through the
+            // approval-gated `run_builtin_bash` command, never the read executor.
+            folder: Capability::Exec,
+            kind: ToolKind::Native,
+            shim: false,
+            native: true,
+        },
     ]
 }
 

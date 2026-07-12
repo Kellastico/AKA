@@ -304,7 +304,7 @@ export function RunTimeline({
           <button
             onClick={() => setActivityOpen((v) => !v)}
             aria-expanded={activityOpen}
-            className="inline-flex max-w-full items-center gap-1.5 self-start rounded-md px-1 py-0.5 text-[11px] text-ink/55 transition-colors hover:bg-ink/5 hover:text-ink/80"
+            className="inline-flex max-w-full items-center gap-1.5 self-start rounded-md px-1 py-0.5 text-sm text-ink/55 transition-colors hover:bg-ink/5 hover:text-ink/80"
           >
             <CaretDown
               size={10}
@@ -359,7 +359,7 @@ function ReasoningNode({ msg }: { msg: Message }) {
       </span>
       <div className="min-w-0 flex-1">
         {/* label row — no toggle; reasoning is always visible below it */}
-        <div className="flex items-center gap-1.5 px-1 py-0.5 text-[11px] text-ink/55">
+        <div className="flex items-center gap-1.5 px-1 py-0.5 text-sm text-ink/55">
           <Brain
             size={12}
             weight={streaming ? "fill" : "regular"}
@@ -375,14 +375,14 @@ function ReasoningNode({ msg }: { msg: Message }) {
             font-mono (the final-answer typeface) so reasoning, tool I/O and the
             answer all read as one unified surface. */}
         {body ? (
-          <p className="mt-0.5 whitespace-pre-wrap px-1 font-mono text-[12px] leading-relaxed text-ink/75 [overflow-wrap:anywhere]">
+          <p className="mt-0.5 whitespace-pre-wrap px-1 font-mono text-xs leading-relaxed text-ink/75 [overflow-wrap:anywhere]">
             {body}
             {streaming && (
               <span className="ml-0.5 inline-block h-3 w-1 animate-pulse rounded-sm bg-indigo-400/70 align-text-bottom" />
             )}
           </p>
         ) : streaming ? (
-          <p className="mt-0.5 px-1 font-mono text-[11.5px] italic text-ink/40">thinking…</p>
+          <p className="mt-0.5 px-1 font-mono text-xs italic text-ink/40">thinking…</p>
         ) : null}
       </div>
     </div>
@@ -599,14 +599,14 @@ function ToolGroup({ msgs }: { msgs: Message[] }) {
         <button
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[11.5px] text-ink/60 transition-colors hover:bg-ink/5 hover:text-ink/85"
+          className="inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-sm text-ink/60 transition-colors hover:bg-ink/5 hover:text-ink/85"
         >
           <Stack size={12} className="shrink-0 text-ink/45" />
           <span className="truncate font-medium">
             {anyRunning ? `Running ${msgs.length} tools` : groupSummary(msgs)}
           </span>
           {elapsed !== undefined && (
-            <span className="ml-1 shrink-0 tabular-nums text-[10px] text-ink/30">
+            <span className="ml-1 shrink-0 tabular-nums text-ink/30">
               {fmtElapsed(elapsed)}
             </span>
           )}
@@ -685,7 +685,7 @@ function AnswerBlock({
       )}
 
       {bodyText.length > 0 && (
-        <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-[13px] leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
+        <div className="w-full min-w-0 max-w-full overflow-hidden break-words font-mono text-sm leading-relaxed text-ink [overflow-wrap:anywhere] [word-break:break-word]">
           <Markdown>{bodyText}</Markdown>
         </div>
       )}
@@ -700,7 +700,7 @@ function AnswerBlock({
       )}
 
       {/* run roll-up — total · ~tokens · status (durations are text, not colour) */}
-      <div className="flex flex-wrap items-center gap-x-1.5 text-[10px] text-ink/40">
+      <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-ink/40">
         {startAt !== undefined && <span className="tabular-nums">{fmtClock(totalMs)}</span>}
         {startAt !== undefined && <span className="text-ink/25">·</span>}
         <span className="tabular-nums">~{fmtTokenCount(tokens)} tokens</span>

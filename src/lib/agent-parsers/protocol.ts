@@ -73,6 +73,8 @@ type Marker = {
   ok?: boolean;
   ms?: number;
   phase?: "start" | "end";
+  /** Diffable write input (search/replace | content JSON) — feeds DiffView. */
+  input?: string;
   linesAdded?: number;
   linesRemoved?: number;
   /** Host witness: SHA-256 of the real post-edit content (recorded change). */
@@ -163,6 +165,10 @@ export function createProtocolParser(): AgentParser {
         kind,
         ...(path ? { path } : {}),
         ...(imagePath ? { imagePath } : {}),
+        // Diffable input the agent attaches to VERIFIED write cards (its
+        // search/replace | content payload) — DiffView reconstructs the
+        // red/green rows from it, same shape ReAct `Action Input` parsing feeds.
+        ...(typeof j.input === "string" ? { input: j.input } : {}),
       };
       const end: AgentEvent = {
         type: "tool_end",
