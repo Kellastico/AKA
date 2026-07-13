@@ -146,6 +146,7 @@ struct ShimError {
 /// Result of a successful `capture-window` run. `kind:"image"` is the render hint
 /// the `@@aka` sentinel + output-console carry so the panel shows the actual image
 /// (via `path`), not a bare filename.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Serialize)]
 struct CaptureResult {
     ok: bool,
@@ -290,6 +291,7 @@ fn normalize_sev(s: &str) -> String {
 // ---------- capture-window ----------
 
 /// Read a `--flag <value>` pair out of the passthrough args.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn flag_value<'a>(rest: &'a [String], flag: &str) -> Option<&'a str> {
     rest.iter()
         .position(|a| a == flag)
@@ -301,12 +303,28 @@ fn flag_value<'a>(rest: &'a [String], flag: &str) -> Option<&'a str> {
 /// pollutes the project tree. Writing out-of-scope is exactly what the `exec`
 /// opt-in permits — an `fs_write` classification would have forced the PNG into
 /// the repo root instead.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn default_capture_path() -> PathBuf {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
     std::env::temp_dir().join(format!("aka-capture-{ts}.png"))
+}
+
+/// capture-window on platforms without the xcap backend (Linux): a clear,
+/// structured refusal. xcap's Linux path needs pipewire/libspa bindings that
+/// don't build against LTS distro headers, and Wayland window-capture is
+/// unreliable — so the subcommand exists (the advertised tool never
+/// "command-not-found"s) but honestly reports the platform gap.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn run_capture_window(_rest: &[String]) -> i32 {
+    print_json(&ShimError {
+        ok: false,
+        tool: Some("capture-window"),
+        error: "capture-window is not supported on this platform (macOS and Windows only)".into(),
+    });
+    1
 }
 
 /// Capture AKA's own window to a PNG.
@@ -320,6 +338,7 @@ fn default_capture_path() -> PathBuf {
 /// Exit code follows the shim philosophy: 0 on a successful capture; non-zero only
 /// when the shim can't do its job (not granted, no matching window, capture/save
 /// failure).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_capture_window(rest: &[String]) -> i32 {
     let project = match project_dir(rest).canonicalize() {
         Ok(p) => p,
