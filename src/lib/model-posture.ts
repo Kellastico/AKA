@@ -88,9 +88,15 @@ export function isFrontierModel(modelId: string | null | undefined): boolean {
 }
 
 /**
- * Whether the model speaks native OpenAI tool-calling. Known tool-calling
- * families only; everything else is assumed `false` (the safe default — the
- * host falls back to the text/`@@aka` path rather than wrongly skipping it).
+ * HINT ONLY — whether the model's *name* matches a known tool-calling family.
+ *
+ * NOT used to route the built-in loop's tool transport: that is decided by
+ * evidence (`use-tool-support-store` — runtime-advertised capabilities +
+ * observed behavior, with an optimistic try-native-first fallback in
+ * `runAdaptiveToolLoop`), because AKA never hardcodes model opinions. This
+ * heuristic survives solely as an advisory input to the external-agent
+ * posture dial (`AGENT_TOOLCALL` env hint), where no runtime round-trip is
+ * available at classification time.
  */
 export function supportsNativeToolCalling(
   modelId: string | null | undefined,

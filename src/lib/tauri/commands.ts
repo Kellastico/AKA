@@ -981,6 +981,21 @@ export async function stopRuntime(name: string): Promise<boolean> {
   return invoke<boolean>("stop_runtime", { name });
 }
 
+/**
+ * Ask the runtime what THIS model can do — the agnostic replacement for
+ * guessing capabilities from the model's name. Speaks Ollama's `/api/show`
+ * (per-model `capabilities: ["completion","tools",…]`). `null` when the
+ * runtime doesn't answer the endpoint (non-Ollama, offline) — callers then
+ * fall back to behavioral detection, never to a name heuristic.
+ */
+export async function modelCapabilities(
+  baseUrl: string,
+  model: string,
+): Promise<string[] | null> {
+  if (!hasTauri()) return null;
+  return invoke<string[] | null>("model_capabilities", { baseUrl, model });
+}
+
 export async function listRuntimeModels(
   baseUrl: string,
   apiKey?: string | null,

@@ -867,6 +867,64 @@ pub async fn check_runtime_health(
     check_health(&base_url, api_key.as_deref()).await
 }
 
+// ---------- runtime-reported model capabilities (agnostic tool routing) ----------
+
+/// Derive the runtime's native API root from an OpenAI-compatible base URL:
+/// `http://localhost:11434/v1` → `http://localhost:11434`. Ollama serves its
+/// model-metadata endpoint (`/api/show`) at the root, beside the `/v1` shim.
+fn runtime_api_root(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1")
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+/// Extract the `capabilities` list from an Ollama `/api/show` response body.
+/// Pure — directly unit-testable. `None` when the shape doesn't match (a
+/// non-Ollama runtime answered something else, or an error body).
+fn parse_show_capabilities(body: &serde_json::Value) -> Option<Vec<String>> {
+    Some(
+        body.get("capabilities")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Ask the runtime what THIS model can do — the agnostic replacement for
+/// guessing capabilities from the model's name. Speaks Ollama's `/api/show`
+/// (the dominant local runtime, which self-reports `capabilities:
+/// ["completion","tools",…]` per model). Best-effort with a short timeout:
+/// `None` for any runtime that doesn't answer the endpoint, in which case the
+/// caller falls back to *behavioral* detection (try native tool-calling once;
+/// fall back to the text protocol on rejection) — never to a name heuristic.
+#[tauri::command]
+pub async fn model_capabilities(
+    base_url: String,
+    model: String,
+) -> Option<Vec<String>> {
+    if model.trim().is_empty() {
+        return None;
+    }
+    let url = format!("{}/api/show", runtime_api_root(&base_url));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let body: serde_json::Value = client
+        .post(&url)
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    parse_show_capabilities(&body)
+}
+
 /// Call the LLM configured for `project_path`. Reads the runtime block from
 /// the project config fresh — config is never cached between calls, so
 /// switching a project's model or base URL takes effect immediately.
@@ -1407,7 +1465,31 @@ pub async fn stop_llm_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_think;
+    use super::{parse_show_capabilities, runtime_api_root, strip_think};
+
+    #[test]
+    fn api_root_strips_the_v1_shim_suffix() {
+        assert_eq!(runtime_api_root("http://localhost:11434/v1"), "http://localhost:11434");
+        assert_eq!(runtime_api_root("http://localhost:11434/v1/"), "http://localhost:11434");
+        assert_eq!(runtime_api_root("http://localhost:11434"), "http://localhost:11434");
+        // Non-Ollama shapes degrade harmlessly — the request just 404s → None.
+        assert_eq!(runtime_api_root("https://openrouter.ai/api/v1"), "https://openrouter.ai/api");
+    }
+
+    #[test]
+    fn show_capabilities_parse_and_reject() {
+        let ok = serde_json::json!({ "capabilities": ["completion", "tools", "vision"] });
+        assert_eq!(
+            parse_show_capabilities(&ok).as_deref(),
+            Some(&["completion".to_string(), "tools".into(), "vision".into()][..])
+        );
+        // A model without tools still parses — the ABSENCE is the signal.
+        let no_tools = serde_json::json!({ "capabilities": ["completion"] });
+        assert_eq!(parse_show_capabilities(&no_tools), Some(vec!["completion".to_string()]));
+        // Non-Ollama / error bodies → None (caller falls back to behavior).
+        assert_eq!(parse_show_capabilities(&serde_json::json!({ "error": "nope" })), None);
+        assert_eq!(parse_show_capabilities(&serde_json::json!({ "capabilities": "tools" })), None);
+    }
 
     #[test]
     fn strips_tagged_block() {

@@ -11,28 +11,40 @@ const EXTERNAL_AGENT: Agent = {
 };
 
 describe("shouldNudgeToolReliability", () => {
-  it("shows for Execute + None with a text-protocol model (no native tool-calling)", () => {
+  it("shows for Execute + None when the evidence says text fallback", () => {
     expect(
       shouldNudgeToolReliability({
         mode: "agent",
         agent: NONE_AGENT,
         modelId: "gemma4:12b",
+        transport: "text", // runtime advertised no tools, or a run fell back
         suppressed: false,
       }),
     ).toBe(true);
   });
 
-  it("hides when the model DOES support native tool-calling", () => {
-    for (const m of ["qwen2.5-coder:7b", "llama-3.1-8b", "gpt-4o"]) {
-      expect(
-        shouldNudgeToolReliability({
-          mode: "agent",
-          agent: NONE_AGENT,
-          modelId: m,
-          suppressed: false,
-        }),
-      ).toBe(false);
-    }
+  it("hides when the evidence says native", () => {
+    expect(
+      shouldNudgeToolReliability({
+        mode: "agent",
+        agent: NONE_AGENT,
+        modelId: "gemma4:12b", // name is irrelevant — evidence decides
+        transport: "native",
+        suppressed: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("hides when nothing is known yet (the loop will try native first)", () => {
+    expect(
+      shouldNudgeToolReliability({
+        mode: "agent",
+        agent: NONE_AGENT,
+        modelId: "some-unheard-of-model",
+        transport: undefined,
+        suppressed: false,
+      }),
+    ).toBe(false);
   });
 
   it("hides outside Execute mode", () => {
@@ -42,6 +54,7 @@ describe("shouldNudgeToolReliability", () => {
           mode,
           agent: NONE_AGENT,
           modelId: "gemma4:12b",
+          transport: "text",
           suppressed: false,
         }),
       ).toBe(false);
@@ -54,6 +67,7 @@ describe("shouldNudgeToolReliability", () => {
         mode: "agent",
         agent: EXTERNAL_AGENT,
         modelId: "gemma4:12b",
+        transport: "text",
         suppressed: false,
       }),
     ).toBe(false);
@@ -65,6 +79,7 @@ describe("shouldNudgeToolReliability", () => {
         mode: "agent",
         agent: NONE_AGENT,
         modelId: null,
+        transport: "text",
         suppressed: false,
       }),
     ).toBe(false);
@@ -76,6 +91,7 @@ describe("shouldNudgeToolReliability", () => {
         mode: "agent",
         agent: NONE_AGENT,
         modelId: "gemma4:12b",
+        transport: "text",
         suppressed: true,
       }),
     ).toBe(false);

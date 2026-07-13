@@ -2,11 +2,8 @@ import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { load } from "@tauri-apps/plugin-store";
 import { useMessagesStore, type ToolKind } from "./use-messages-store";
-import {
-  projectContextBlock,
-  runNativeToolLoop,
-  runTextToolLoop,
-} from "../lib/builtin-loop";
+import { projectContextBlock, runAdaptiveToolLoop } from "../lib/builtin-loop";
+import { supportKey, useToolSupportStore } from "./use-tool-support-store";
 import { isBuiltinLoopAgent, useAgentsStore } from "./use-agents-store";
 import { useAttachmentsStore } from "./use-attachments-store";
 import { useProjectConfigStore } from "./use-project-config-store";
@@ -1734,7 +1731,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         try {
           const tools = await builtinToolDefs(phase);
-          const native = classifyModel(modelId).nativeToolCalling;
+
+          // Transport by EVIDENCE, never by model name (AKA is agnostic):
+          // ask the runtime what this model advertises (Ollama self-reports
+          // per-model capabilities), fold in anything this session already
+          // observed, and otherwise start OPTIMISTIC — try native tool-calling
+          // and let the adaptive loop fall back to the text protocol if the
+          // endpoint rejects the `tools` parameter.
+          const runtimeBaseUrl = useRuntimeStore.getState().active?.baseUrl ?? "";
+          try {
+            await useToolSupportStore.getState().ensureProbe(runtimeBaseUrl, modelId);
+          } catch {
+            /* unknown is fine — the adaptive loop probes behaviorally */
+          }
+          const knownTransport =
+            useToolSupportStore.getState().known[supportKey(runtimeBaseUrl, modelId)];
+          const startNative = knownTransport !== "text";
 
           // Execute runs mutate the tree — take the same "Before run" baseline
           // an agent run gets, so Restart / "Reject & roll back" work here too.
@@ -1874,33 +1886,65 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // they get a bigger turn budget than a read-only planning pass.
           const maxSteps = phase === "exec" ? 32 : undefined;
 
-          const result = native
-            ? await runNativeToolLoop({
-                system,
-                task,
-                tools,
-                modelTurn: async (messages) => {
-                  bailIfStale();
-                  return callLlmTools(messages, tools, projectPath, modelId);
+          // A 4xx rejection before native ever worked = "this endpoint can't
+          // take a tools request" (Ollama answers 400 "does not support tools").
+          // Auth and rate-limit rejections are real errors, not capability
+          // signals, so they propagate instead of triggering the fallback.
+          const isToolsUnsupported = (err: unknown) => {
+            const e = err as { kind?: string; status?: number } | null;
+            return (
+              e?.kind === "ProviderRejected" &&
+              typeof e.status === "number" &&
+              e.status >= 400 &&
+              e.status < 500 &&
+              e.status !== 401 &&
+              e.status !== 403 &&
+              e.status !== 429
+            );
+          };
+
+          const result = await runAdaptiveToolLoop({
+            system,
+            task,
+            tools,
+            startNative,
+            modelTurn: async (messages) => {
+              bailIfStale();
+              return callLlmTools(messages, tools, projectPath, modelId);
+            },
+            textTurn: async (messages) => {
+              bailIfStale();
+              return callLlm(messages, projectPath, modelId);
+            },
+            isToolsUnsupported,
+            onTransportFallback: () => {
+              // Remember the observation and tell the user — a downgrade
+              // mid-run must never look like silence.
+              useToolSupportStore.getState().observe(runtimeBaseUrl, modelId, "text");
+              if (genOf(runKey) !== myGen) return;
+              store().add(
+                {
+                  role: "reasoning",
+                  content: "",
+                  thinkingContent:
+                    "This runtime rejected native tool-calling for the selected model — switching to AKA's text-based tool protocol…",
+                  thinkingStartedAt: Date.now(),
+                  thinkingEndedAt: Date.now(),
+                  modelId: modelId || undefined,
+                  agentId,
                 },
-                executeTool,
-                hooks,
-                maxSteps,
-                signal: controller.signal,
-              })
-            : await runTextToolLoop({
-                system,
-                task,
-                tools,
-                textTurn: async (messages) => {
-                  bailIfStale();
-                  return callLlm(messages, projectPath, modelId);
-                },
-                executeTool,
-                hooks,
-                maxSteps,
-                signal: controller.signal,
-              });
+                ownerSessionId,
+              );
+            },
+            executeTool,
+            hooks,
+            maxSteps,
+            signal: controller.signal,
+          });
+          // A run that finished natively is ground truth for this session.
+          if (result.transport === "native") {
+            useToolSupportStore.getState().observe(runtimeBaseUrl, modelId, "native");
+          }
 
           if (genOf(runKey) !== myGen) return;
           const finalText =

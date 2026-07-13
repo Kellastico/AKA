@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   projectContextBlock,
   parseTextToolCalls,
+  runAdaptiveToolLoop,
   runNativeToolLoop,
   runTextToolLoop,
   textProtocolSpec,
@@ -389,5 +390,92 @@ describe("projectContextBlock", () => {
     expect(block).not.toContain("Top-level entries");
     // Empty listing behaves like null.
     expect(projectContextBlock("/proj/demo", "  ")).not.toContain("Top-level entries");
+  });
+});
+
+describe("runAdaptiveToolLoop", () => {
+  const tools = [
+    {
+      type: "function",
+      function: { name: "read_file", description: "Read a file.", parameters: {} },
+    },
+  ];
+  /** Error shaped like a 400 ProviderRejected — "endpoint can't take tools". */
+  const rejects400 = { kind: "ProviderRejected", status: 400, message: "does not support tools" };
+  const isToolsUnsupported = (err: unknown) =>
+    (err as { status?: number })?.status === 400;
+
+  it("stays native when the endpoint accepts tools; text path never runs", async () => {
+    const modelTurn = vi.fn(async () => answerTurn("Native answer."));
+    const textTurn = vi.fn(async () => "unused");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const res = await runAdaptiveToolLoop({
+      system: "s", task: "t", tools, startNative: true,
+      modelTurn, textTurn, isToolsUnsupported, executeTool,
+    });
+    expect(res.transport).toBe("native");
+    expect(res.finalText).toBe("Native answer.");
+    expect(textTurn).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the text protocol when the first native turn is rejected", async () => {
+    const modelTurn = vi.fn(async () => { throw rejects400; });
+    const textTurn = vi.fn(async () => "Text answer.");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const onTransportFallback = vi.fn();
+    const res = await runAdaptiveToolLoop({
+      system: "s", task: "t", tools, startNative: true,
+      modelTurn, textTurn, isToolsUnsupported, onTransportFallback, executeTool,
+    });
+    expect(res.transport).toBe("text");
+    expect(res.finalText).toBe("Text answer.");
+    expect(onTransportFallback).toHaveBeenCalledTimes(1);
+    expect(modelTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the native attempt entirely when evidence already says text", async () => {
+    const modelTurn = vi.fn(async () => answerTurn("never"));
+    const textTurn = vi.fn(async () => "Straight to text.");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    const res = await runAdaptiveToolLoop({
+      system: "s", task: "t", tools, startNative: false,
+      modelTurn, textTurn, isToolsUnsupported, executeTool,
+    });
+    expect(res.transport).toBe("text");
+    expect(modelTurn).not.toHaveBeenCalled();
+  });
+
+  it("propagates unclassified errors instead of falling back", async () => {
+    const authError = { kind: "ProviderRejected", status: 401, message: "bad key" };
+    const modelTurn = vi.fn(async () => { throw authError; });
+    const textTurn = vi.fn(async () => "unused");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "" }));
+    await expect(
+      runAdaptiveToolLoop({
+        system: "s", task: "t", tools, startNative: true,
+        modelTurn, textTurn, isToolsUnsupported, executeTool,
+      }),
+    ).rejects.toBe(authError);
+    expect(textTurn).not.toHaveBeenCalled();
+  });
+
+  it("never downgrades mid-run: a 400 AFTER a successful native turn propagates", async () => {
+    // Turn 1 calls a tool (native works); turn 2 throws a 400 — that's a real
+    // error now, not a capability signal.
+    const turns = [toolTurn("c1", "read_file", { path: "a.ts" })];
+    let i = 0;
+    const modelTurn = vi.fn(async () => {
+      if (i < turns.length) return turns[i++];
+      throw rejects400;
+    });
+    const textTurn = vi.fn(async () => "unused");
+    const executeTool = vi.fn(async (): Promise<ToolResult> => ({ ok: true, content: "data" }));
+    await expect(
+      runAdaptiveToolLoop({
+        system: "s", task: "t", tools, startNative: true,
+        modelTurn, textTurn, isToolsUnsupported, executeTool,
+      }),
+    ).rejects.toBe(rejects400);
+    expect(textTurn).not.toHaveBeenCalled();
   });
 });

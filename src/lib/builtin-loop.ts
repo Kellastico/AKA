@@ -462,3 +462,80 @@ export async function runTextToolLoop(
 
   return { finalText: null, steps, stopReason: "budget" };
 }
+
+// ---------- adaptive transport (agnostic tool routing) ----------
+
+/** How the model was actually driven — decided by evidence, never by name. */
+export type ToolTransport = "native" | "text";
+
+export type AdaptiveLoopOptions = Omit<LoopOptions, "modelTurn"> & {
+  modelTurn: ModelTurn;
+  textTurn: TextTurn;
+  /**
+   * Start with native tool-calling? Comes from evidence the caller already has
+   * (runtime-advertised capabilities, a previous observation this session) —
+   * and defaults OPTIMISTIC: an unknown model gets offered the native API
+   * first, because trying costs one cheap rejected request while assuming
+   * costs the whole feature.
+   */
+  startNative: boolean;
+  /**
+   * Classify an error thrown by `modelTurn` as "this endpoint/model rejected
+   * the tools parameter" (e.g. an HTTP 4xx provider rejection). Only such
+   * errors trigger the text fallback; everything else propagates.
+   */
+  isToolsUnsupported?: (err: unknown) => boolean;
+  /** Fired once if the run falls back native → text, so the caller can record the observation and tell the user. */
+  onTransportFallback?: () => void;
+};
+
+export type AdaptiveLoopResult = LoopResult & { transport: ToolTransport };
+
+/** Sentinel: the first native turn was rejected for using `tools`. */
+class ToolsUnsupportedSentinel extends Error {
+  constructor(public readonly cause: unknown) {
+    super("native tool-calling rejected by the endpoint");
+  }
+}
+
+/**
+ * Drive the tool loop with the transport chosen by EVIDENCE, not model name:
+ * start native (unless the caller already knows better), and if the endpoint
+ * rejects the very first tools request, fall back to the text protocol and
+ * finish the same task there. Once a native turn has succeeded, later errors
+ * are real failures and propagate — no silent mid-run downgrades.
+ */
+export async function runAdaptiveToolLoop(
+  opts: AdaptiveLoopOptions,
+): Promise<AdaptiveLoopResult> {
+  if (!opts.startNative) {
+    const r = await runTextToolLoop(opts);
+    return { ...r, transport: "text" };
+  }
+
+  // Guard the native turn: until one succeeds, a tools-shaped rejection means
+  // "this endpoint can't do native tool-calling" rather than a hard error.
+  let nativeSucceeded = false;
+  const guardedTurn: ModelTurn = async (messages) => {
+    try {
+      const turn = await opts.modelTurn(messages);
+      nativeSucceeded = true;
+      return turn;
+    } catch (err) {
+      if (!nativeSucceeded && opts.isToolsUnsupported?.(err)) {
+        throw new ToolsUnsupportedSentinel(err);
+      }
+      throw err;
+    }
+  };
+
+  try {
+    const r = await runNativeToolLoop({ ...opts, modelTurn: guardedTurn });
+    return { ...r, transport: "native" };
+  } catch (err) {
+    if (!(err instanceof ToolsUnsupportedSentinel)) throw err;
+    opts.onTransportFallback?.();
+    const r = await runTextToolLoop(opts);
+    return { ...r, transport: "text" };
+  }
+}

@@ -65,6 +65,7 @@ pub fn run() {
             commands::llm::detect_runtimes,
             commands::llm::list_models,
             commands::llm::check_runtime_health,
+            commands::llm::model_capabilities,
             commands::llm::call_llm,
             commands::llm::call_llm_tools,
             commands::llm::call_llm_stream,
