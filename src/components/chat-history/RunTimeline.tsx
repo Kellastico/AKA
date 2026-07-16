@@ -22,6 +22,7 @@ import { CopyButton } from "./CopyButton";
 import { fmtElapsed } from "./MessageItem";
 import { useTicker, fmtClock, fmtTokenCount } from "./timeline-util";
 import { baseName, DiffStat, DiffView, toolIOLabels } from "./tool-summary";
+import { CommandLine, CommandOutput } from "../../lib/syntax-highlight";
 import { toChatMessages, estimateTokens } from "../../lib/token-estimate";
 
 /* ── tool kind → icon + accent (matches the rest of the chat surface) ── */
@@ -536,8 +537,15 @@ function ToolNode({ msg }: { msg: Message }) {
                     <div className="mb-0.5 text-[9px] uppercase tracking-wider text-ink/35">
                       {toolIOLabels(msg.toolKind).input}
                     </div>
+                    {/* A shell command (run) is colorized by role — verb, path,
+                        body — so it reads at a glance; other inputs (a query, a
+                        path) stay as plain monospace. */}
                     <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10.5px] text-ink/70 [overflow-wrap:anywhere]">
-                      {msg.toolInput}
+                      {msg.toolKind === "run" ? (
+                        <CommandLine text={msg.toolInput} />
+                      ) : (
+                        msg.toolInput
+                      )}
                     </pre>
                   </div>
                 )}
@@ -546,8 +554,16 @@ function ToolNode({ msg }: { msg: Message }) {
                     <div className="mb-0.5 text-[9px] uppercase tracking-wider text-ink/35">
                       {toolIOLabels(msg.toolKind).output}
                     </div>
+                    {/* Terminal output for a run tool: command lines echoed in
+                        the output are colorized in place (many agents report the
+                        command inside the result, not as a separate input);
+                        listings/stdout stay neutral. Other tools' output is plain. */}
                     <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10.5px] text-ink/70 [overflow-wrap:anywhere]">
-                      {msg.toolPreview}
+                      {msg.toolKind === "run" ? (
+                        <CommandOutput text={msg.toolPreview} />
+                      ) : (
+                        msg.toolPreview
+                      )}
                     </pre>
                   </div>
                 )}

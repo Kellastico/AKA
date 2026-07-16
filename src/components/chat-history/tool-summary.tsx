@@ -1,5 +1,6 @@
 import { NotePencil } from "@phosphor-icons/react";
 import type { Message, ToolKind } from "../../stores/use-messages-store";
+import { CodeText } from "../../lib/syntax-highlight";
 
 /**
  * Trim a phrase to at most `max` words. The agent's active-state line is a
@@ -243,10 +244,15 @@ export function DiffView({
               key={i}
               className={[
                 "whitespace-pre-wrap rounded-sm px-1.5 font-mono text-[11px] leading-[1.55] [overflow-wrap:anywhere]",
-                r.sign === "-" ? "bg-red-500/10 text-red-300" : "bg-emerald-500/10 text-emerald-300",
+                // The +/- gutter keeps its add/remove tint; the code itself is
+                // syntax-colored so an edit reads as code, not a flat line.
+                r.sign === "-" ? "bg-red-500/10" : "bg-emerald-500/10",
               ].join(" ")}
             >
-              {r.sign} {r.text}
+              <span className={r.sign === "-" ? "text-red-300/80" : "text-emerald-300/80"}>
+                {r.sign}{" "}
+              </span>
+              <CodeText text={r.text} />
             </div>
           ))}
           {overflow > 0 && (
