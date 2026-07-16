@@ -27,9 +27,13 @@ const SHELL_CLASS: Record<ShellKind, string> = {
   ws: "",
 };
 
+// Every hue clears WCAG 2.1 AA (4.5:1) on the accordion's darkest panel bg —
+// most reach AAA — including on the diff-tinted rows. `comment` is deliberately
+// the dimmest, but held at ink/60 (≈6.5:1) rather than the app's usual ink/40
+// chrome tint (≈3.6:1, sub-AA) because a comment is content, not decoration.
 const CODE_CLASS: Record<CodeKind, string> = {
   str: "text-amber-300",
-  comment: "text-ink/40 italic",
+  comment: "text-ink/60 italic",
   num: "text-purple-300",
   keyword: "text-fuchsia-300",
   fn: "text-sky-300",
