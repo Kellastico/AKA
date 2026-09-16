@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { ArrowLeft } from "@phosphor-icons/react";
 import { readTextFile } from "../../lib/tauri/commands";
-import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { Tooltip } from "../Tooltip";
 
 // Cap how much of a file we render. Keeps the table fast on giant files;
@@ -53,16 +52,17 @@ function relativePath(path: string): string {
 }
 
 export function FileContent({
-  paneId,
+  onBack,
   filePath,
 }: {
-  paneId?: string;
+  /** When set, render a back control. The filetree passes this only in its
+   *  narrow single-column mode, where the tree is swapped out for the file. */
+  onBack?: () => void;
   filePath?: string;
 }) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const showFilesInPane = useWorkspaceStore((s) => s.showFilesInPane);
 
   useEffect(() => {
     setLines(null);
@@ -90,50 +90,50 @@ export function FileContent({
   }, [filePath]);
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden font-mono text-[11px] leading-5">
-      <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-2 py-1">
-        {paneId && (
+    <div className="flex h-full w-full flex-col overflow-hidden font-mono text-[13px] leading-6">
+      <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-2 py-1.5">
+        {onBack && (
           <Tooltip label="Back to files">
             <button
-              onClick={() => showFilesInPane(paneId)}
+              onClick={onBack}
               aria-label="Back to files"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white/50 hover:bg-white/10 hover:text-white"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/50 hover:bg-white/10 hover:text-white"
             >
-              <ArrowLeft size={12} weight="bold" />
+              <ArrowLeft size={14} weight="bold" />
             </button>
           </Tooltip>
         )}
-        <span className="truncate text-[10px] text-white/35">
+        <span className="truncate text-[12px] text-white/35">
           {filePath ? relativePath(filePath) : "no file"}
         </span>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
         {!filePath && (
-          <div className="px-3 py-2 text-[11px] text-white/35">
-            Open a file from the Files pane.
+          <div className="px-3 py-2 text-[13px] text-white/35">
+            Open a file from the filetree.
           </div>
         )}
         {error && (
-          <div className="px-3 py-2 text-[11px] text-rose-300/70">
+          <div className="px-3 py-2 text-[13px] text-rose-300/70">
             {error}
           </div>
         )}
         {filePath && lines === null && !error && (
-          <div className="px-3 py-2 text-[11px] italic text-white/30">
+          <div className="px-3 py-2 text-[13px] italic text-white/30">
             loading…
           </div>
         )}
         {lines && (
           <table className="min-w-full border-collapse">
             <colgroup>
-              <col style={{ width: "2.75rem" }} />
+              <col style={{ width: "3.25rem" }} />
               <col />
             </colgroup>
             <tbody>
               {lines.map((line, i) => (
                 <tr key={i} className="group hover:bg-white/4">
-                  <td className="select-none whitespace-nowrap px-3 text-right text-[10px] text-white/20 group-hover:text-white/35">
+                  <td className="select-none whitespace-nowrap px-3 text-right text-[11px] text-white/20 group-hover:text-white/35">
                     {i + 1}
                   </td>
                   <td className="whitespace-pre px-2">{highlight(line)}</td>
@@ -143,7 +143,7 @@ export function FileContent({
           </table>
         )}
         {truncated && (
-          <div className="border-t border-white/8 px-3 py-2 text-[10px] italic text-white/35">
+          <div className="border-t border-white/8 px-3 py-2 text-[11px] italic text-white/35">
             File truncated at {MAX_LINES.toLocaleString()} lines.
           </div>
         )}

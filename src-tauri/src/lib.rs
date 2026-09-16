@@ -25,6 +25,7 @@ pub fn run() {
         .manage(commands::checkpoints::CheckpointState::default())
         .manage(commands::dev_server::DevServerState::default())
         .manage(commands::files::WatcherState::default())
+        .manage(Mutex::new(commands::hardware_stats::HardwareSampler::default()))
         .manage(commands::llm::LlmStreamState::default())
         .manage(commands::llm::RuntimeLauncher::default())
         .manage(commands::mcp::McpToolCache::default())
@@ -43,6 +44,11 @@ pub fn run() {
                     tracing::error!("failed to start built-in runtime: {e}");
                 }
             });
+            // Hardware readings for the Context Window modal. The loop only
+            // takes a reading while a model is loaded — until then it ticks
+            // and does nothing.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(commands::hardware_stats::run_sampler(handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -83,6 +89,9 @@ pub fn run() {
             commands::tokens::count_tokens,
             commands::tokens::get_context_limit,
             commands::tokens::get_memory_usage,
+            commands::hardware_stats::get_hardware_stats,
+            commands::gguf_spec::inspect_model,
+            commands::gguf_spec::inspect_ollama_model,
             commands::verify::run_verify,
             commands::shell::open_external_url,
             commands::shell_run::shell_run,
@@ -102,6 +111,7 @@ pub fn run() {
             commands::files::unwatch_dir,
             commands::files::list_dir,
             commands::files::count_lines,
+            commands::files::walk_project,
             commands::models::list_local_models,
             commands::models::download_model,
             commands::models::cancel_download,
@@ -119,6 +129,8 @@ pub fn run() {
             sidecar::abort_runtime,
             sidecar::load_builtin_model,
             sidecar::unload_builtin_model,
+            sidecar::set_context_size,
+            sidecar::set_reasoning,
             sidecar::enable_cuda_mode,
             sandbox::set_sandbox,
             sandbox::clear_sandbox,

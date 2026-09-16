@@ -5,6 +5,8 @@ pub mod compiler;
 pub mod dev_server;
 pub mod diff;
 pub mod files;
+pub mod gguf_spec;
+pub mod hardware_stats;
 pub mod llm;
 pub mod mcp;
 pub mod message_validator;

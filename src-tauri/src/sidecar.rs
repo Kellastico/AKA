@@ -566,11 +566,26 @@ pub async fn abort_runtime(state: State<'_, Mutex<SidecarState>>) -> Result<bool
 /// (with a spinner) and surface load failures up front rather than on the first
 /// chat request. The long timeout covers large models — loading a 14B can take
 /// tens of seconds. Returns the sidecar's error message on failure.
+/// Outcome of a model load, including what the runtime decided about the
+/// context window. A switch can shrink it — see `ctx_clamped` — because a
+/// window that was safe on the previous model can be several times the
+/// machine's RAM on this one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadModelOutcome {
+    /// Context window now in force, after any clamp.
+    pub ctx_size: u32,
+    /// True when the carried-over window didn't fit and was reduced.
+    pub ctx_clamped: bool,
+    /// What the window was before the load.
+    pub ctx_requested: u32,
+}
+
 #[tauri::command]
 pub async fn load_builtin_model(
     state: State<'_, Mutex<SidecarState>>,
     filename: String,
-) -> Result<(), String> {
+) -> Result<LoadModelOutcome, String> {
     let port = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         if s.port == 0 {
@@ -589,7 +604,28 @@ pub async fn load_builtin_model(
         .await
         .map_err(|e| format!("could not reach built-in runtime: {e}"))?;
     if resp.status().is_success() {
-        Ok(())
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LoadResp {
+            #[serde(default)]
+            ctx_size: u32,
+            #[serde(default)]
+            ctx_clamped: bool,
+            #[serde(default)]
+            ctx_requested: u32,
+        }
+        // An older runtime omits these; defaulting to "nothing was clamped"
+        // keeps the load succeeding rather than failing on a missing field.
+        let body = resp.json::<LoadResp>().await.unwrap_or(LoadResp {
+            ctx_size: 0,
+            ctx_clamped: false,
+            ctx_requested: 0,
+        });
+        Ok(LoadModelOutcome {
+            ctx_size: body.ctx_size,
+            ctx_clamped: body.ctx_clamped,
+            ctx_requested: body.ctx_requested,
+        })
     } else {
         // Surface the sidecar's `{ "error": "…" }` body when present.
         let msg = resp
@@ -600,6 +636,94 @@ pub async fn load_builtin_model(
             .unwrap_or_else(|| "model load failed".to_string());
         Err(msg)
     }
+}
+
+/// Set the built-in runtime's context window (tokens).
+///
+/// Applies from the next message: the context and its KV cache are built per
+/// request, so nothing is reloaded and the loaded weights stay put. The
+/// runtime accepts any value in its own sane bounds — the memory cost is
+/// surfaced to the user as a warning, never enforced here.
+#[tauri::command]
+pub async fn set_context_size(
+    state: State<'_, Mutex<SidecarState>>,
+    ctx_size: u32,
+) -> Result<(), String> {
+    let port = {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.port == 0 {
+            return Err("Built-in runtime is not running".into());
+        }
+        s.port
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/context-size"))
+        .json(&serde_json::json!({ "ctxSize": ctx_size }))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach built-in runtime: {e}"))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    // Say what actually went wrong. A 404 specifically means the running
+    // sidecar predates this endpoint — the binary in `binaries/` is stale
+    // relative to `aka-runtime/`, which is easy to hit in development and
+    // impossible to diagnose from a generic failure message.
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Err(if status == reqwest::StatusCode::NOT_FOUND {
+        "the running built-in runtime is out of date and has no context-size \
+         endpoint (rebuild it with src-tauri/scripts/rename-runtime.sh)"
+            .to_string()
+    } else if body.is_empty() {
+        format!("the built-in runtime refused the change (HTTP {status})")
+    } else {
+        format!("{body} (HTTP {status})")
+    })
+}
+
+/// Turn the built-in runtime's reasoning step on or off.
+///
+/// Only affects models whose chat template carries an `enable_thinking`
+/// switch; others have no reasoning step and ignore it. Applies from the next
+/// message — nothing reloads.
+#[tauri::command]
+pub async fn set_reasoning(
+    state: State<'_, Mutex<SidecarState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let port = {
+        let s = state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.port == 0 {
+            return Err("Built-in runtime is not running".into());
+        }
+        s.port
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/v1/reasoning"))
+        .json(&serde_json::json!({ "enabled": enabled }))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach built-in runtime: {e}"))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    Err(if status == reqwest::StatusCode::NOT_FOUND {
+        "the running built-in runtime is out of date and has no reasoning \
+         endpoint (rebuild it with src-tauri/scripts/rename-runtime.sh)"
+            .to_string()
+    } else {
+        format!("the built-in runtime refused the change (HTTP {status})")
+    })
 }
 
 /// Unload the built-in runtime's current model, freeing its weights, by POSTing

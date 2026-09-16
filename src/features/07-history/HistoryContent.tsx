@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowCounterClockwise,
   CaretDown,
@@ -15,7 +15,7 @@ import {
 } from "../../stores/use-chat-store";
 import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { Tooltip } from "../../components/Tooltip";
-import type { Checkpoint } from "../../lib/tauri/commands";
+import { checkpointsAvailable, type Checkpoint } from "../../lib/tauri/commands";
 import { groupRunSpans, type RunSpan } from "./group-runs";
 
 /** Short relative age, e.g. "8s ago", "3m ago", "2h ago". */
@@ -55,8 +55,35 @@ function dotClass(kind: string): string {
  */
 export function HistoryContent() {
   const activeSessionId = useProjectsStore((s) => s.activeSessionId);
+  const projectPath = useProjectsStore(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.path ?? null,
+  );
   const checkpoints = useActiveSessionCheckpoints();
   const available = useActiveSessionCheckpointsAvailable();
+  const setCheckpointsAvailable = useChatStore(
+    (s) => s.setCheckpointsAvailable,
+  );
+
+  // Until this pane asked, availability was only ever probed from inside a run
+  // launch — and only on the paths that actually snapshot. So opening History
+  // in a project that isn't a git repo used to fall back to the optimistic
+  // default and read "No runs yet … each run is checkpointed and will appear
+  // here", promising something that could never happen. Probe on open instead.
+  useEffect(() => {
+    if (!activeSessionId || !projectPath) return;
+    let alive = true;
+    void checkpointsAvailable(projectPath)
+      .then((ok) => {
+        if (alive) setCheckpointsAvailable(activeSessionId, ok);
+      })
+      .catch(() => {
+        // A failed probe leaves the optimistic default rather than claiming
+        // history is unavailable on what may be a perfectly good repo.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeSessionId, projectPath, setCheckpointsAvailable]);
   const lastTask = useChatStore((s) =>
     activeSessionId ? (s.lastTaskBySession[activeSessionId] ?? null) : null,
   );

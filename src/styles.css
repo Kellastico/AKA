@@ -124,6 +124,20 @@ body,
   }
 }
 
+/* Pane taking over the workspace. Grows from just under full size rather than
+   sliding, so the motion reads as "this pane got bigger" and not "a new panel
+   arrived" — the pane underneath is the same one, already on screen. */
+@keyframes pane-expand {
+  from {
+    opacity: 0.6;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 @keyframes morph-in {
   from {
     opacity: 0;
@@ -232,15 +246,6 @@ body,
     opacity: 1;
     clip-path: inset(0 0 0 0);
   }
-}
-
-/* Omnibox refresh — fires when the user opens a new session or project.
-   Slides in from ~4px above with a subtle fade so the context switch feels
-   acknowledged without distracting from the main content. */
-@keyframes omnibox-flash {
-  0%   { opacity: 0.55; transform: translateY(-4px) scale(0.994); }
-  65%  { opacity: 1;    transform: translateY(1px)  scale(1.002); }
-  100% { opacity: 1;    transform: translateY(0)    scale(1);     }
 }
 
 /* Bottom-sheet animations — travel the full sheet height, not 24px. The
@@ -400,5 +405,4 @@ body,
   --animate-reveal-up-out: reveal-up-out 0.16s ease-in forwards;
   --animate-sheet-up-in: sheet-up-in 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   --animate-sheet-up-out: sheet-up-out 0.2s ease-in forwards;
-  --animate-omnibox-flash: omnibox-flash 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }

@@ -16,10 +16,10 @@ import {
   type DownloadProgress,
   type HfGgufFile,
   type HfModel,
+  type HfSort,
   type LocalModel,
 } from "../../lib/tauri/commands";
 import {
-  CURATED_MODELS,
   modelIdFromFilename,
   type CuratedModel,
 } from "./curated-models";
@@ -28,7 +28,12 @@ import { useProjectConfigStore } from "../../stores/use-project-config-store";
 
 const hasTauri = () => "__TAURI_INTERNALS__" in window;
 
-export type ModelFilter = "all" | "installed" | "light" | "standard" | "pro";
+/**
+ * Manage Models only ever lists models you actually have, so "installed" and
+ * the tier buckets no longer separate anything. What is worth filtering on is
+ * whether this machine can run the thing.
+ */
+export type ModelFilter = "all" | "fits";
 
 /** Live download progress with a derived transfer rate for ETA. */
 export type DownloadState = {
@@ -78,6 +83,8 @@ type ModelBrowserState = {
   // --- HuggingFace discovery (search + paste-a-repo) ---
   hfPanelOpen: boolean;
   hfQuery: string;
+  /** The query the current results belong to — echoed as "Searched for …". */
+  hfSubmittedQuery: string;
   hfSearching: boolean;
   hfResults: HfModel[];
   /** True once a search/lookup has run, to distinguish "no results" from idle. */
@@ -85,18 +92,49 @@ type ModelBrowserState = {
   hfError: string | null;
   /** The repo whose files are being shown, or null while at the search list. */
   hfSelectedRepo: string | null;
-  hfFiles: HfGgufFile[] | null;
-  hfLoadingFiles: boolean;
+  /**
+   * Per-repo `.gguf` listings, keyed by `owner/name`. Result rows fill this in
+   * as they scroll into view — a row needs the real byte size of the quant it
+   * stands for, and the search response carries no sizes. Drilling into a repo
+   * then reads the same entry, so the file list is usually already there.
+   */
+  hfRepoFiles: Record<string, HfGgufFile[]>;
+  /** Repos with a listing request in flight, so one row fetches each repo once. */
+  hfLoadingRepos: Record<string, boolean>;
+
+  /** Server-side ordering — changing it re-runs the search. */
+  hfSort: HfSort;
+  /** Owners kept by the "Created By" facet. Empty = no author filter. */
+  hfAuthors: string[];
+  /** Quant labels kept by the "Quantizations" facet. Empty = no quant filter. */
+  hfQuants: string[];
+  /** Whether the facet sidebar is showing. */
+  hfFiltersOpen: boolean;
 
   openHfPanel: () => void;
   closeHfPanel: () => void;
   setHfQuery: (q: string) => void;
   /** Run the input: a repo id/URL jumps straight to its files; else search. */
   submitHfInput: () => Promise<void>;
+  /**
+   * Search `q` and install the results. `keepFacets` preserves the author /
+   * quant picks (pruned to the new result set) — true when re-sorting the same
+   * query, false for a query the user just typed.
+   */
+  runHfSearch: (q: string, keepFacets: boolean) => Promise<void>;
   selectHfRepo: (repo: string) => Promise<void>;
-  backToHfResults: () => void;
+  /** Fetch a repo's `.gguf` listing unless it is cached or already in flight. */
+  ensureHfRepoFiles: (repo: string) => Promise<void>;
+  /** Step back one level: a repo's files → results → the empty prompt → closed. */
+  hfBack: () => void;
   /** Download a chosen repo file, routed through the existing RAM gate. */
   downloadHfFile: (repo: string, file: HfGgufFile) => void;
+
+  setHfSort: (sort: HfSort) => void;
+  toggleHfAuthor: (author: string) => void;
+  toggleHfQuant: (quant: string) => void;
+  clearHfFacets: () => void;
+  toggleHfFilters: () => void;
 };
 
 let listenersInstalled = false;
@@ -137,13 +175,18 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
 
   hfPanelOpen: false,
   hfQuery: "",
+  hfSubmittedQuery: "",
   hfSearching: false,
   hfResults: [],
   hfSearched: false,
   hfError: null,
   hfSelectedRepo: null,
-  hfFiles: null,
-  hfLoadingFiles: false,
+  hfRepoFiles: {},
+  hfLoadingRepos: {},
+  hfSort: "downloads",
+  hfAuthors: [],
+  hfQuants: [],
+  hfFiltersOpen: true,
 
   init: async () => {
     if (get().initialized) return;
@@ -298,7 +341,19 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
     if (get().loadingModel) return; // one load at a time
     set({ loadingModel: filename });
     try {
-      await loadBuiltinModel(filename);
+      const outcome = await loadBuiltinModel(filename);
+      // A switch can shrink the context window: what a window costs depends on
+      // the model, so one that was safe before can exceed this machine's RAM
+      // now. Say so — silently changing it under the user is how a switch
+      // turns into a crash they can't explain.
+      if (outcome?.ctxClamped) {
+        useRuntimeStore.getState().pushToast({
+          kind: "info",
+          text:
+            `Context reduced to ${outcome.ctxSize.toLocaleString()} tokens — ` +
+            `${outcome.ctxRequested.toLocaleString()} would not fit this model in RAM.`,
+        });
+      }
       await useRuntimeStore.getState().selectBuiltin();
       await useRuntimeStore.getState().selectModel(modelIdFromFilename(filename));
       useRuntimeStore.getState().pushToast({
@@ -332,11 +387,13 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
     set({
       hfPanelOpen: false,
       hfQuery: "",
+      hfSubmittedQuery: "",
       hfResults: [],
       hfSearched: false,
       hfError: null,
       hfSelectedRepo: null,
-      hfFiles: null,
+      hfAuthors: [],
+      hfQuants: [],
     }),
 
   setHfQuery: (hfQuery) => set({ hfQuery }),
@@ -349,14 +406,37 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
       await get().selectHfRepo(repoIdFromInput(q));
       return;
     }
-    set({ hfSearching: true, hfError: null, hfSelectedRepo: null, hfFiles: null });
+    // A query the user typed is a new question — facet picks were made against
+    // a different result set, so they go.
+    await get().runHfSearch(q, false);
+  },
+
+  runHfSearch: async (q, keepFacets) => {
+    set({
+      hfSearching: true,
+      hfError: null,
+      hfSelectedRepo: null,
+      ...(keepFacets ? {} : { hfAuthors: [], hfQuants: [] }),
+    });
     try {
-      const hfResults = await hfSearchModels(q);
-      set({ hfResults, hfSearched: true });
+      const hfResults = await hfSearchModels(q, get().hfSort);
+      set({ hfResults, hfSearched: true, hfSubmittedQuery: q });
+      // A reorder can slide repos in and out of the 50-hit window, so drop any
+      // kept pick the new set no longer offers — otherwise the list filters
+      // down to nothing with no visible reason why.
+      if (keepFacets) {
+        const authors = new Set(hfResults.map((r) => r.author));
+        const quants = new Set(hfResults.flatMap((r) => r.quants));
+        set({
+          hfAuthors: get().hfAuthors.filter((a) => authors.has(a)),
+          hfQuants: get().hfQuants.filter((qt) => quants.has(qt)),
+        });
+      }
     } catch (err) {
       set({
         hfResults: [],
         hfSearched: true,
+        hfSubmittedQuery: q,
         hfError: err instanceof Error ? err.message : "Search failed",
       });
     } finally {
@@ -365,28 +445,87 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
   },
 
   selectHfRepo: async (repo) => {
-    set({
-      hfSelectedRepo: repo,
-      hfFiles: null,
-      hfLoadingFiles: true,
-      hfError: null,
-    });
+    set({ hfSelectedRepo: repo, hfError: null });
+    await get().ensureHfRepoFiles(repo);
+  },
+
+  ensureHfRepoFiles: async (repo) => {
+    const s = get();
+    // Rows and the file list both ask for this; whoever gets there first wins
+    // and the rest read the cache.
+    if (s.hfRepoFiles[repo] || s.hfLoadingRepos[repo]) return;
+    set({ hfLoadingRepos: { ...get().hfLoadingRepos, [repo]: true } });
     try {
-      const hfFiles = await hfListGgufFiles(repo);
-      set({ hfFiles });
+      const files = await hfListGgufFiles(repo);
+      set({ hfRepoFiles: { ...get().hfRepoFiles, [repo]: files } });
     } catch (err) {
-      set({
-        hfFiles: [],
-        hfError:
-          err instanceof Error ? err.message : "Could not list repository files",
-      });
+      // Only surface the failure when the user is looking at that repo — a
+      // background row fetch shouldn't put a banner over the result list.
+      if (get().hfSelectedRepo === repo) {
+        set({
+          hfError:
+            err instanceof Error
+              ? err.message
+              : "Could not list repository files",
+        });
+      }
+      set({ hfRepoFiles: { ...get().hfRepoFiles, [repo]: [] } });
     } finally {
-      set({ hfLoadingFiles: false });
+      const { [repo]: _done, ...rest } = get().hfLoadingRepos;
+      set({ hfLoadingRepos: rest });
     }
   },
 
-  backToHfResults: () =>
-    set({ hfSelectedRepo: null, hfFiles: null, hfError: null }),
+  hfBack: () => {
+    // One predictable step out at a time, so Back never skips a level.
+    const s = get();
+    if (s.hfSelectedRepo) {
+      set({ hfSelectedRepo: null, hfError: null });
+      return;
+    }
+    if (s.hfSearched || s.hfResults.length > 0) {
+      set({
+        hfQuery: "",
+        hfSubmittedQuery: "",
+        hfResults: [],
+        hfSearched: false,
+        hfError: null,
+        hfAuthors: [],
+        hfQuants: [],
+      });
+      return;
+    }
+    get().closeHfPanel();
+  },
+
+  setHfSort: (hfSort) => {
+    if (get().hfSort === hfSort) return;
+    set({ hfSort });
+    // Ordering is a HuggingFace query parameter, so it needs a fresh request.
+    // Re-run the query the results belong to, not whatever is in the box — the
+    // user may have started typing their next search already.
+    const submitted = get().hfSubmittedQuery;
+    if (submitted) void get().runHfSearch(submitted, true);
+  },
+
+  toggleHfAuthor: (author) =>
+    set(({ hfAuthors }) => ({
+      hfAuthors: hfAuthors.includes(author)
+        ? hfAuthors.filter((a) => a !== author)
+        : [...hfAuthors, author],
+    })),
+
+  toggleHfQuant: (quant) =>
+    set(({ hfQuants }) => ({
+      hfQuants: hfQuants.includes(quant)
+        ? hfQuants.filter((q) => q !== quant)
+        : [...hfQuants, quant],
+    })),
+
+  clearHfFacets: () => set({ hfAuthors: [], hfQuants: [] }),
+
+  toggleHfFilters: () =>
+    set(({ hfFiltersOpen }) => ({ hfFiltersOpen: !hfFiltersOpen })),
 
   downloadHfFile: (repo, file) => {
     if (file.sharded) return; // multi-part models can't be loaded standalone
@@ -421,24 +560,50 @@ export const useModelBrowserStore = create<ModelBrowserState>((set, get) => ({
   },
 }));
 
-/** Curated entries plus any local models not in the curated list (unverified). */
-export function allBrowserModels(local: LocalModel[]): CuratedModel[] {
-  const curated = [...CURATED_MODELS];
-  const curatedFilenames = new Set(curated.map((m) => m.filename));
-  const extras: CuratedModel[] = local
-    .filter((m) => !curatedFilenames.has(m.filename))
-    .map((m) => ({
-      id: `local-${m.filename}`,
-      name: m.filename.replace(/\.gguf$/i, ""),
-      description: "Imported local model.",
-      huggingfaceRepo: "",
-      filename: m.filename,
-      sizeGb: m.sizeBytes / 1_073_741_824,
-      minRamGb: 0,
-      tier: "standard",
-      tags: ["local"],
-      contextWindow: 0,
-      verified: false,
-    }));
-  return [...curated, ...extras];
+/** Descriptor for a model that lives on disk (or is on its way there). */
+function localDescriptor(filename: string, sizeBytes: number): CuratedModel {
+  const sizeGb = sizeBytes / 1_073_741_824;
+  return {
+    id: `local-${filename}`,
+    name: modelIdFromFilename(filename),
+    description: "",
+    huggingfaceRepo: "",
+    filename,
+    sizeGb,
+    // Nothing on disk tells us what a model needs, so estimate it from the
+    // weights. The UI labels this as an estimate rather than a spec.
+    minRamGb: estimateMinRamGb(sizeGb),
+    tier: "standard",
+    tags: [],
+    contextWindow: 0,
+    verified: false,
+  };
+}
+
+/**
+ * The Manage Models list: models on disk, plus any download still in flight.
+ *
+ * In-flight downloads are included deliberately. They aren't on disk yet, but
+ * dropping them would mean starting a download from the HuggingFace panel,
+ * closing it, and finding no progress bar and no way to cancel anywhere.
+ */
+export function installedBrowserModels(
+  local: LocalModel[],
+  downloads: Record<string, DownloadState>,
+): CuratedModel[] {
+  const onDisk = local.map((m) => localDescriptor(m.filename, m.sizeBytes));
+  const have = new Set(local.map((m) => m.filename));
+  const arriving = Object.entries(downloads)
+    .filter(([filename]) => !have.has(filename))
+    .map(([filename, d]) => localDescriptor(filename, d.totalBytes));
+  return [...onDisk, ...arriving].sort((a, b) =>
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+  );
+}
+
+/** Whether this machine has the RAM to run `model`. Unknown RAM counts as fine. */
+export function fitsHardware(model: CuratedModel, totalRamGb: number): boolean {
+  if (!totalRamGb || totalRamGb <= 0) return true;
+  if (model.minRamGb <= 0) return true;
+  return model.minRamGb <= totalRamGb;
 }

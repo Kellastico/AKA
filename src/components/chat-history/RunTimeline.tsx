@@ -393,6 +393,7 @@ function ReasoningNode({ msg }: { msg: Message }) {
 /* ── tool node (flat, hugged chip — rendered inline on the timeline rail) ── */
 function ToolNode({ msg }: { msg: Message }) {
   const openDiffForFile = useWorkspaceStore((s) => s.openDiffForFile);
+  const openFileInFiletree = useWorkspaceStore((s) => s.openFileInFiletree);
   const [open, setOpen] = useState(false);
   const [lightbox, setLightbox] = useState(false);
   const running = msg.toolStatus === "running";
@@ -418,6 +419,13 @@ function ToolNode({ msg }: { msg: Message }) {
 
   const hasDiff = msg.linesAdded !== undefined || msg.linesRemoved !== undefined;
   const isDiffable = !!msg.toolPath && hasDiff;
+  // A path the agent wrote opens as a diff; a path it merely read has no diff
+  // to show, so it opens in the filetree's viewer rather than doing nothing.
+  const openPath = () => {
+    if (!msg.toolPath) return;
+    if (isDiffable) openDiffForFile(msg.toolPath);
+    else openFileInFiletree(msg.toolPath);
+  };
 
   return (
     <div className="relative flex gap-2.5 pl-1">
@@ -446,25 +454,24 @@ function ToolNode({ msg }: { msg: Message }) {
           {msg.toolPath && (
             <span
               role="button"
-              tabIndex={isDiffable ? 0 : -1}
+              tabIndex={0}
               onClick={(e) => {
-                if (!isDiffable) return;
                 e.stopPropagation();
-                openDiffForFile(msg.toolPath!);
+                openPath();
               }}
               onKeyDown={(e) => {
-                if (!isDiffable) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   e.stopPropagation();
-                  openDiffForFile(msg.toolPath!);
+                  openPath();
                 }
               }}
-              className={[
-                "max-w-[180px] truncate rounded bg-ink/5 px-1.5 py-0.5 font-mono text-[10px] text-ink/65",
-                isDiffable ? "hover:bg-ink/10 hover:text-ink/90" : "",
-              ].join(" ")}
-              title={msg.toolPath}
+              className="max-w-[180px] truncate rounded bg-ink/5 px-1.5 py-0.5 font-mono text-[10px] text-ink/65 hover:bg-ink/10 hover:text-ink/90"
+              title={
+                isDiffable
+                  ? `Open diff for ${msg.toolPath}`
+                  : `Open ${msg.toolPath}`
+              }
             >
               {baseName(msg.toolPath)}
             </span>

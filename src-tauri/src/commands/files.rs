@@ -424,3 +424,107 @@ pub async fn list_dir(path: String) -> Result<Vec<DirEntryDto>, String> {
     Ok(entries)
 }
 
+
+// ---------------------------------------------------------------------------
+// Project walk — backs the filetree pane's in-pane search box.
+// ---------------------------------------------------------------------------
+
+// Bounds so a pathological repo can't stall the pane or blow up the IPC
+// payload. The frontend surfaces a "first N entries" note when `truncated`
+// comes back true, so a capped index never silently lies about misses.
+const MAX_WALK_DEPTH: usize = 12;
+const MAX_WALK_ENTRIES: usize = 20_000;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkEntryDto {
+    name: String,
+    path: String,
+    /// Path relative to the walked root, always '/'-separated.
+    rel_path: String,
+    kind: String, // "dir" | "file"
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkResultDto {
+    entries: Vec<WalkEntryDto>,
+    /// True when a bound was hit — the index is a prefix, not the whole tree.
+    truncated: bool,
+}
+
+/// Breadth-first walk of `path`, honouring the same `is_noise` filter as
+/// `list_dir` so a filtered search can never surface a row the unfiltered tree
+/// would hide. Breadth-first matters: when the cap trims the walk, what
+/// survives is the shallow part of the tree, which is what people search for.
+#[tauri::command]
+pub async fn walk_project(path: String) -> Result<WalkResultDto, String> {
+    let root = PathBuf::from(&path);
+    let root_str = root.to_string_lossy().replace('\\', "/");
+    let root_str = root_str.trim_end_matches('/').to_string();
+
+    // Fail loudly on an unreadable root — a silent empty index would read as
+    // "no matches" for every query the user types.
+    tokio::fs::metadata(&root)
+        .await
+        .map_err(|e| format!("stat {}: {}", path, e))?;
+
+    let mut entries: Vec<WalkEntryDto> = Vec::new();
+    let mut truncated = false;
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+        std::collections::VecDeque::new();
+    queue.push_back((root, 0));
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            // An unreadable subdir (permissions, a broken symlink, a race with
+            // an agent deleting it) shouldn't abort the whole index.
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if entries.len() >= MAX_WALK_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_noise(&name) {
+                continue;
+            }
+            let ft = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            // Don't follow symlinked dirs — a self-referential link would walk
+            // forever, and the depth cap alone wouldn't make that cheap.
+            let is_dir = ft.is_dir() && !ft.is_symlink();
+            let full = entry.path();
+            let full_str = full.to_string_lossy().replace('\\', "/");
+            let rel_path = full_str
+                .strip_prefix(&root_str)
+                .map(|s| s.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| full_str.clone());
+
+            entries.push(WalkEntryDto {
+                name,
+                path: full.to_string_lossy().to_string(),
+                rel_path,
+                kind: if is_dir { "dir" } else { "file" }.to_string(),
+            });
+
+            if is_dir {
+                if depth < MAX_WALK_DEPTH {
+                    queue.push_back((full, depth + 1));
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+        if entries.len() >= MAX_WALK_ENTRIES {
+            truncated = true;
+            break;
+        }
+    }
+
+    Ok(WalkResultDto { entries, truncated })
+}

@@ -3,7 +3,7 @@ import { listDir } from "./tauri/commands";
 import { useProjectsStore } from "../stores/use-projects-store";
 
 export type FolderEntry = {
-  /** Absolute filesystem path — what we hand to `openFileInActivePane`. */
+  /** Absolute filesystem path — what we hand to `openFileInFiletree`. */
   path: string;
   /** Path relative to the project root — what we show to the user. */
   relPath: string;
@@ -43,7 +43,8 @@ function relativeTo(child: string, root: string): string {
  * Walk the project's folder tree breadth-first up to `maxDepth` levels and
  * up to `maxFolders` results. Skips common noise dirs (.git, node_modules,
  * build outputs). Returns folders flagged with whether they already contain
- * a Context.md sibling — used by the Omnibox to suggest where to add one.
+ * a Context.md sibling — used by the filetree pane's "Add Context.md"
+ * button to pick a target folder.
  */
 export async function scanProjectFolders(
   rootPath: string,

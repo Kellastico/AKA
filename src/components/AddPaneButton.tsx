@@ -3,10 +3,10 @@ import {
   Plus,
   Terminal,
   GitDiff,
-  FileText,
   TerminalWindow,
   Browser,
   ClockCounterClockwise,
+  TreeStructure,
   type Icon,
 } from "@phosphor-icons/react";
 import {
@@ -20,9 +20,8 @@ import { Popover } from "./Popover";
 const PANE_ICONS: Record<PaneType, Icon> = {
   output: Terminal,
   diff: GitDiff,
-  files: FileText,
+  files: TreeStructure,
   console: TerminalWindow,
-  file: FileText,
   browser: Browser,
   history: ClockCounterClockwise,
 };

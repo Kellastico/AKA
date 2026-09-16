@@ -9,7 +9,6 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useFileBuffer } from "../../lib/use-file-buffer";
-import { useWorkspaceStore } from "../../stores/use-workspace-store";
 import { Tooltip } from "../Tooltip";
 
 /**
@@ -21,16 +20,17 @@ import { Tooltip } from "../Tooltip";
  * file on disk. When both happen, the conflict banner surfaces.
  */
 export function MarkdownPane({
-  paneId,
+  onBack,
   filePath,
 }: {
-  paneId?: string;
+  /** When set, render a back control. The filetree passes this only in its
+   *  narrow single-column mode, where the tree is swapped out for the file. */
+  onBack?: () => void;
   filePath?: string;
 }) {
   const buf = useFileBuffer(filePath ?? null);
   const [diffOpen, setDiffOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const showFilesInPane = useWorkspaceStore((s) => s.showFilesInPane);
 
   // Cmd/Ctrl+S to save.
   useEffect(() => {
@@ -58,19 +58,19 @@ export function MarkdownPane({
     <div className="flex h-full w-full flex-col overflow-hidden">
       {/* path + status bar */}
       <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-2 py-1.5">
-        {paneId && (
+        {onBack && (
           <Tooltip label="Back to files">
             <button
-              onClick={() => showFilesInPane(paneId)}
+              onClick={onBack}
               aria-label="Back to files"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white/50 hover:bg-white/10 hover:text-white"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/50 hover:bg-white/10 hover:text-white"
             >
-              <ArrowLeft size={12} weight="bold" />
+              <ArrowLeft size={14} weight="bold" />
             </button>
           </Tooltip>
         )}
-        <span className="truncate text-[10px] text-white/35">{filePath}</span>
-        <span className="ml-auto inline-flex items-center gap-2 text-[10px] text-white/40">
+        <span className="truncate text-[12px] text-white/35">{filePath}</span>
+        <span className="ml-auto inline-flex items-center gap-2 text-[11px] text-white/40">
           {buf.status === "loading" && (
             <span className="inline-flex items-center gap-1">
               <CircleNotch size={11} className="animate-spin" />
@@ -108,28 +108,28 @@ export function MarkdownPane({
               <div className="font-medium">
                 The agent rewrote this file while you had unsaved edits.
               </div>
-              <div className="mt-0.5 text-[11px] text-amber-100/70">
+              <div className="mt-0.5 text-[12px] text-amber-100/70">
                 Choose which version to keep. Reloading discards your edits.
               </div>
             </div>
             <div className="flex shrink-0 gap-1">
               <button
                 onClick={buf.reloadFromDisk}
-                className="inline-flex items-center gap-1 rounded border border-amber-300/40 bg-amber-400/15 px-2 py-0.5 text-[11px] text-amber-100 hover:bg-amber-400/25"
+                className="inline-flex items-center gap-1 rounded border border-amber-300/40 bg-amber-400/15 px-2 py-0.5 text-[12px] text-amber-100 hover:bg-amber-400/25"
               >
                 <ArrowsClockwise size={11} weight="bold" />
                 Reload from disk
               </button>
               <button
                 onClick={() => setDiffOpen((v) => !v)}
-                className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-2 py-0.5 text-[11px] text-white/80 hover:bg-white/10"
+                className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-2 py-0.5 text-[12px] text-white/80 hover:bg-white/10"
               >
                 <Eye size={11} weight="bold" />
                 {diffOpen ? "Hide diff" : "View diff"}
               </button>
               <button
                 onClick={buf.dismissConflict}
-                className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-2 py-0.5 text-[11px] text-white/80 hover:bg-white/10"
+                className="inline-flex items-center gap-1 rounded border border-white/15 bg-white/5 px-2 py-0.5 text-[12px] text-white/80 hover:bg-white/10"
                 title="Keep my edits"
               >
                 <X size={11} weight="bold" />
@@ -140,14 +140,14 @@ export function MarkdownPane({
 
           {diffOpen && (
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <div className="rounded border border-white/10 bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-white/80">
-                <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">
+              <div className="rounded border border-white/10 bg-black/30 p-2 font-mono text-[11px] leading-relaxed text-white/80">
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-white/40">
                   Your buffer
                 </div>
                 <pre className="whitespace-pre-wrap break-words">{buf.value}</pre>
               </div>
-              <div className="rounded border border-white/10 bg-black/30 p-2 font-mono text-[10px] leading-relaxed text-white/80">
-                <div className="mb-1 text-[10px] uppercase tracking-wide text-white/40">
+              <div className="rounded border border-white/10 bg-black/30 p-2 font-mono text-[11px] leading-relaxed text-white/80">
+                <div className="mb-1 text-[11px] uppercase tracking-wide text-white/40">
                   On disk (agent)
                 </div>
                 <pre className="whitespace-pre-wrap break-words">
@@ -161,7 +161,7 @@ export function MarkdownPane({
 
       {/* error */}
       {buf.error && !buf.conflict && (
-        <div className="shrink-0 border-b border-rose-400/30 bg-rose-500/10 px-3 py-1.5 text-[11px] text-rose-200">
+        <div className="shrink-0 border-b border-rose-400/30 bg-rose-500/10 px-3 py-1.5 text-[12px] text-rose-200">
           {buf.error}
         </div>
       )}
@@ -173,7 +173,7 @@ export function MarkdownPane({
         onChange={(e) => buf.setValue(e.target.value)}
         spellCheck={false}
         placeholder={buf.status === "loading" ? "" : "# Markdown…"}
-        className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[12px] leading-6 text-white/85 placeholder:text-white/25 focus:outline-none"
+        className="min-h-0 flex-1 resize-none bg-transparent px-4 py-3 font-mono text-[13px] leading-6 text-white/85 placeholder:text-white/25 focus:outline-none"
       />
     </div>
   );

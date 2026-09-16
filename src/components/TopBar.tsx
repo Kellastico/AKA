@@ -1,10 +1,9 @@
 import { AddPaneButton } from "./AddPaneButton";
-import { Omnibox } from "./Omnibox";
 import { RuntimeButton } from "../features/01-llm-provider/RuntimeButton";
 import { PluginsButton } from "../features/10-plugin-system/PluginsButton";
 
 // macOS traffic-light cluster sits at ~(20, center) and spans ~68px wide.
-// Reserve a bit more so the search input never collides with hover targets.
+// Reserve a bit more so the left cluster never collides with hover targets.
 const TRAFFIC_LIGHT_RESERVE = 84;
 
 export function TopBar() {
@@ -18,17 +17,11 @@ export function TopBar() {
         <RuntimeButton />
         <PluginsButton />
       </div>
+      {/* File search lives entirely inside the Filetree pane now. The middle of
+          the bar is bare chrome, which makes the whole span a window-drag
+          region. */}
       <div className="ml-auto shrink-0">
         <AddPaneButton />
-      </div>
-      {/* Centered on the WINDOW, independent of the side clusters' widths so it
-          never looks lop-sided. Same width as before (up to 640px); the clamp
-          only reserves room for the clusters on narrow windows so it can't
-          collide with them. The clusters above stay in normal flow. */}
-      <div className="pointer-events-none absolute left-1/2 top-0 flex h-14 -translate-x-1/2 items-center">
-        <div className="pointer-events-auto w-[min(640px,calc(100vw-37rem))]">
-          <Omnibox />
-        </div>
       </div>
     </header>
   );

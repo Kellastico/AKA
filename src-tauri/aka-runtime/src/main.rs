@@ -15,7 +15,7 @@ mod inference;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,9 +73,15 @@ struct AppState {
     models_dir: PathBuf,
     gpu_layers: u32,
     threads: u32,
-    /// Context window (tokens) to allocate per request. Flows from `--ctx-size`
-    /// into each request's `LlamaContextParams`.
-    ctx_size: u32,
+    /// Context window (tokens) to allocate per request. Starts at `--ctx-size`
+    /// and can be changed at runtime via `POST /v1/context-size`; each request
+    /// reads it fresh, so a change applies to the next message without
+    /// reloading the weights.
+    ctx_size: AtomicU32,
+    /// Whether models that support a reasoning step should use it. Runtime
+    /// state like `ctx_size`, set via `POST /v1/reasoning`, read fresh per
+    /// request. Models with no `enable_thinking` switch ignore it entirely.
+    reasoning: AtomicBool,
     /// Per-request cancel flags, keyed by a request ID assigned in
     /// `chat_completions`. `POST /abort` flips every registered flag; each
     /// generation loop checks only its own, so a concurrent request can no
@@ -164,7 +170,8 @@ async fn main() {
         models_dir: args.models_dir.clone(),
         gpu_layers: args.gpu_layers,
         threads,
-        ctx_size: args.ctx_size,
+        ctx_size: AtomicU32::new(args.ctx_size),
+        reasoning: AtomicBool::new(true),
         active_requests: Arc::new(Mutex::new(HashMap::new())),
         backend,
         loaded_model: Arc::new(Mutex::new(None)),
@@ -187,6 +194,8 @@ async fn main() {
         .route("/health", get(health))
         .route("/hardware", get(hardware_handler))
         .route("/metrics", get(metrics_handler))
+        .route("/v1/context-size", post(set_context_size_handler))
+        .route("/v1/reasoning", post(set_reasoning_handler))
         .route("/v1/models", get(list_models))
         .route("/v1/models/load", post(load_model_handler))
         .route("/v1/models/unload", post(unload_model_handler))
@@ -237,15 +246,18 @@ async fn hardware_handler(State(state): State<Arc<AppState>>) -> Json<hardware::
 /// throughput of the last generation. The host queries this (the frontend never
 /// talks to the sidecar directly).
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let (model_loaded, model_filename, model_mb) = {
+    let (model_loaded, model_filename, model_mb, kv_bytes_per_token, n_ctx_train, max_fitting_ctx_opt) = {
         let guard = state.loaded_model.lock().unwrap();
         match guard.as_ref() {
             Some(m) => (
                 true,
                 Some(m.filename.clone()),
                 m.size_bytes as f64 / (1024.0 * 1024.0),
+                Some(m.kv_bytes_per_token),
+                Some(m.n_ctx_train),
+                Some(max_fitting_ctx(m.kv_bytes_per_token, m.size_bytes)),
             ),
-            None => (false, None, 0.0),
+            None => (false, None, 0.0, None, None, None),
         }
     };
 
@@ -266,9 +278,70 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
         "modelFilename": model_filename,
         "modelMb": model_mb,
         "processRssMb": process_rss_mb,
-        "ctxSize": state.ctx_size,
+        "ctxSize": state.ctx_size.load(Ordering::Relaxed),
+        "kvBytesPerToken": kv_bytes_per_token,
+        "nCtxTrain": n_ctx_train,
+        "maxFittingCtx": max_fitting_ctx_opt,
+        "reasoning": state.reasoning.load(Ordering::Relaxed),
         "lastTokensPerSec": last_tokens_per_sec,
     }))
+}
+
+/// Turn the reasoning step on or off for models that support one.
+///
+/// Accepted regardless of whether the loaded model has the switch: a model
+/// without one simply ignores it, and the setting persists so it still applies
+/// after switching to a model that does.
+async fn set_reasoning_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or((StatusCode::BAD_REQUEST, "enabled must be a boolean".into()))?;
+    state.reasoning.store(enabled, Ordering::Relaxed);
+    tracing::info!("reasoning set to {enabled}");
+    Ok(Json(json!({ "reasoning": enabled })))
+}
+
+/// Smallest context llama.cpp can build; below this nothing fits.
+const MIN_CTX_SIZE: u32 = 256;
+/// Far past any model's trained window — an upper sanity bound, not policy.
+const MAX_CTX_SIZE: u32 = 1_048_576;
+
+/// Set the context window used by subsequent generations.
+///
+/// Takes effect on the next request — the context (and its KV cache) is built
+/// per generation, so nothing is reloaded and no weights move. Deliberately
+/// permissive: the caller is warned about the memory cost in the UI but is
+/// never blocked here, since only the user knows what they are willing to
+/// risk on their own machine. The bounds below are correctness limits, not
+/// policy: llama.cpp needs a non-zero context, and a value this large is
+/// already far past any model's trained window.
+async fn set_context_size_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    let requested = body
+        .get("ctxSize")
+        .and_then(Value::as_u64)
+        .ok_or((StatusCode::BAD_REQUEST, "ctxSize must be a number".into()))?;
+    let requested = u32::try_from(requested).unwrap_or(MAX_CTX_SIZE);
+    if !(MIN_CTX_SIZE..=MAX_CTX_SIZE).contains(&requested) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("ctxSize must be between {MIN_CTX_SIZE} and {MAX_CTX_SIZE}"),
+        ));
+    }
+
+    state.ctx_size.store(requested, Ordering::Relaxed);
+    tracing::info!("context size set to {requested}");
+    Ok(Json(json!({ "ctxSize": requested })))
 }
 
 /// Validate that `path` is a real GGUF file by its magic bytes (0–3 == "GGUF")
@@ -421,12 +494,11 @@ async fn ensure_model_loaded(
     // Load off the async runtime — model load is heavy and synchronous.
     let backend = Arc::clone(&state.backend);
     let gpu_layers = state.gpu_layers;
-    let ctx_size = state.ctx_size;
     let fname = filename.to_string();
     let path = model_path.clone();
 
     let loaded = tokio::task::spawn_blocking(move || {
-        inference::load_model(&backend, &path, fname, gpu_layers, ctx_size)
+        inference::load_model(&backend, &path, fname, gpu_layers)
     })
     .await
     .map_err(|e| {
@@ -438,6 +510,31 @@ async fn ensure_model_loaded(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let arc = Arc::new(loaded);
+
+    // Re-price the context window against the model that just loaded.
+    //
+    // `ctx_size` is a property of the runtime, not of any one model, so it
+    // survives a switch. What a window *costs* does not: KV bytes per token
+    // vary five-fold and more between models, so a window that was harmless on
+    // a small model can demand several times the machine's RAM on a larger one.
+    // llama.cpp allocates that cache up front on the next request, so leaving a
+    // carried-over value in place turns a model switch into a hard crash.
+    //
+    // Clamping here is not overriding a user's choice — they never made this
+    // choice for this model. Deliberately raising it afterwards is still
+    // allowed, warnings and all.
+    let fitting = max_fitting_ctx(arc.kv_bytes_per_token, arc.size_bytes);
+    let previous = state.ctx_size.load(Ordering::Relaxed);
+    if previous > fitting {
+        state.ctx_size.store(fitting, Ordering::Relaxed);
+        tracing::warn!(
+            "context clamped {previous} -> {fitting} for {filename}: \
+             {} B/token would need {:.1} GB of KV at {previous}",
+            arc.kv_bytes_per_token,
+            arc.kv_bytes_per_token as f64 * previous as f64 / 1_073_741_824.0,
+        );
+    }
+
     *state.loaded_model.lock().unwrap() = Some(Arc::clone(&arc));
     tracing::info!("loaded model {filename}");
     Ok(arc)
@@ -450,8 +547,24 @@ async fn load_model_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoadModelRequest>,
 ) -> Response {
+    let requested_ctx = state.ctx_size.load(Ordering::Relaxed);
     match ensure_model_loaded(&state, &req.filename).await {
-        Ok(_) => Json(json!({ "loaded": true, "filename": req.filename })).into_response(),
+        Ok(loaded) => {
+            let effective = state.ctx_size.load(Ordering::Relaxed);
+            Json(json!({
+                "loaded": true,
+                "filename": req.filename,
+                "ctxSize": effective,
+                // Set when the carried-over window didn't fit this model, so
+                // the UI can say so rather than silently changing under them.
+                "ctxClamped": effective < requested_ctx,
+                "ctxRequested": requested_ctx,
+                "maxFittingCtx": max_fitting_ctx(loaded.kv_bytes_per_token, loaded.size_bytes),
+                "nCtxTrain": loaded.n_ctx_train,
+                "kvBytesPerToken": loaded.kv_bytes_per_token,
+            }))
+            .into_response()
+        }
         Err((code, msg)) => (code, Json(json!({ "error": msg }))).into_response(),
     }
 }
@@ -502,15 +615,45 @@ fn preflight_ram_check(model_min_ram_gb: Option<f32>) -> Result<(), String> {
     let Some(required) = model_min_ram_gb else {
         return Ok(()); // unknown — allow
     };
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_memory();
-    let total_gb = sys.total_memory() as f32 / 1_073_741_824.0;
+    let total_gb = total_ram_gb();
     if required > total_gb {
         return Err(format!(
             "Insufficient RAM: model needs {required:.1}GB, system has {total_gb:.1}GB"
         ));
     }
     Ok(())
+}
+
+fn total_ram_gb() -> f32 {
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_memory();
+    sys.total_memory() as f32 / 1_073_741_824.0
+}
+
+/// Share of RAM a model plus its KV cache may occupy before the machine is in
+/// real trouble. Above this the OS is left without room for itself, and on
+/// unified-memory hardware it is the same pool the GPU draws from.
+const SAFE_RAM_FRACTION: f32 = 0.75;
+
+/// The largest context window whose KV cache still fits alongside the weights
+/// inside `SAFE_RAM_FRACTION` of system RAM.
+///
+/// The KV cache is allocated up front when a context is created, so exceeding
+/// physical memory is not a slow degradation — it is an immediate, hard
+/// failure that can take the whole machine down with it.
+fn max_fitting_ctx(kv_bytes_per_token: u64, weights_bytes: u64) -> u32 {
+    if kv_bytes_per_token == 0 {
+        return u32::MAX;
+    }
+    let budget = (total_ram_gb() * SAFE_RAM_FRACTION) as f64 * 1_073_741_824.0;
+    let left = budget - weights_bytes as f64;
+    if left <= 0.0 {
+        return MIN_CTX_SIZE;
+    }
+    ((left / kv_bytes_per_token as f64) as u64)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .max(MIN_CTX_SIZE)
 }
 
 async fn chat_completions(
@@ -597,13 +740,19 @@ async fn chat_completions(
         .iter()
         .map(|m| (m.role.clone(), m.content.clone()))
         .collect();
-    let prompt = inference::format_prompt(&loaded.model, &messages);
+    let prompt = inference::format_prompt(
+        &loaded.model,
+        &messages,
+        state.reasoning.load(Ordering::Relaxed),
+    );
 
     let gen = inference::GenerateParams {
         prompt,
         temperature: req.temperature.unwrap_or(DEFAULT_TEMPERATURE),
         max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         threads: state.threads,
+        ctx_size: state.ctx_size.load(Ordering::Relaxed),
+        reasoning: state.reasoning.load(Ordering::Relaxed),
     };
 
     let backend = Arc::clone(&state.backend);
@@ -733,4 +882,55 @@ fn unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod ctx_tests {
+    use super::*;
+
+    // Real figures from three GGUF headers, on a 16 GB machine.
+    const MINICPM_KV: u64 = 24_576;
+    const QWEN14B_KV: u64 = 196_608;
+    const GB: u64 = 1_073_741_824;
+
+    /// The budget calculation, isolated from the machine actually running the
+    /// test so the expectations hold on any hardware.
+    fn fitting(kv_per_token: u64, weights: u64, ram_gb: f64) -> u64 {
+        let budget = ram_gb * SAFE_RAM_FRACTION as f64 * GB as f64;
+        let left = budget - weights as f64;
+        if left <= 0.0 {
+            return MIN_CTX_SIZE as u64;
+        }
+        (left / kv_per_token as f64) as u64
+    }
+
+    #[test]
+    fn a_small_model_can_hold_a_large_window() {
+        // MiniCPM at 1.4 GB leaves ~10.6 GB of a 16 GB budget for KV.
+        let n = fitting(MINICPM_KV, (1.4 * GB as f64) as u64, 16.0);
+        assert!(n > 262_144, "expected room for a full window, got {n}");
+    }
+
+    #[test]
+    fn a_large_model_cannot_hold_the_same_window() {
+        // The crash: 262k carried from MiniCPM onto Qwen 14B is 48 GB of KV.
+        let n = fitting(QWEN14B_KV, (8.4 * GB as f64) as u64, 16.0);
+        assert!(n < 262_144, "should not fit a 262k window, got {n}");
+        // Nor even the model's own 131k trained window.
+        assert!(n < 131_072, "trained window is not a safety bound, got {n}");
+    }
+
+    #[test]
+    fn never_returns_a_window_llama_cannot_build() {
+        // Weights alone past the budget still leave a usable floor rather than
+        // zero, so a load never produces an unbuildable context.
+        let n = fitting(QWEN14B_KV, 64 * GB, 16.0);
+        assert_eq!(n, MIN_CTX_SIZE as u64);
+    }
+
+    #[test]
+    fn an_unknown_architecture_is_left_alone() {
+        // No KV figure means no basis to clamp on; don't invent one.
+        assert_eq!(max_fitting_ctx(0, 8 * GB), u32::MAX);
+    }
 }

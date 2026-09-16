@@ -1093,9 +1093,25 @@ export async function abortRuntime(): Promise<boolean> {
  * a spinner and surface load errors up front. Rejects with the sidecar's error
  * message on failure. Can take tens of seconds for large models.
  */
-export async function loadBuiltinModel(filename: string): Promise<void> {
-  if (!hasTauri()) return;
-  return invoke("load_builtin_model", { filename });
+/**
+ * What the runtime decided about the context window when a model loaded.
+ * A switch can shrink it: a window that was safe on the previous model can
+ * cost several times the machine's RAM on this one.
+ */
+export type LoadModelOutcome = {
+  /** Context window now in force, after any clamp. */
+  ctxSize: number;
+  /** True when the carried-over window didn't fit and was reduced. */
+  ctxClamped: boolean;
+  /** What the window was before the load. */
+  ctxRequested: number;
+};
+
+export async function loadBuiltinModel(
+  filename: string,
+): Promise<LoadModelOutcome | null> {
+  if (!hasTauri()) return null;
+  return invoke<LoadModelOutcome>("load_builtin_model", { filename });
 }
 
 /** Unload the built-in runtime's current model, freeing its weights. */
@@ -1201,23 +1217,46 @@ export async function pickGgufFile(): Promise<string | null> {
 
 /** A search hit from the HuggingFace model index. */
 export type HfModel = {
+  /** Full repo id, `owner/name`. */
   id: string;
+  /** Owner segment — the "Created By" facet and the avatar tile. */
+  author: string;
+  /** Repo name without the owner. */
+  name: string;
   downloads: number;
   likes: number;
+  /** HuggingFace task tag, e.g. `text-generation`, `image-text-to-text`. */
+  pipelineTag: string | null;
+  /** Parameter count from the repo's GGUF header, e.g. 27320697856. */
+  params: number | null;
+  /** Training context length from the GGUF header. */
+  contextLength: number | null;
+  /** Distinct quant labels across the repo's downloadable weights, sorted. */
+  quants: string[];
+  /** How many weights the Download button will offer. */
+  fileCount: number;
 };
+
+/** Orderings the picker exposes, passed through to HuggingFace's `sort`. */
+export type HfSort = "downloads" | "likes" | "lastModified" | "trendingScore";
 
 /** A `.gguf` file inside a repo, with its real (LFS) size. */
 export type HfGgufFile = {
   filename: string;
   sizeBytes: number;
+  /** Quant parsed from the name (`Q4_K_M`); null for vision projectors. */
+  quant: string | null;
   /** One shard of a multi-part model — can't be loaded on its own. */
   sharded: boolean;
 };
 
-/** Search HuggingFace for GGUF models, ranked by downloads (max 30). */
-export async function hfSearchModels(query: string): Promise<HfModel[]> {
+/** Search HuggingFace for GGUF models, ordered by `sort` (max 50). */
+export async function hfSearchModels(
+  query: string,
+  sort: HfSort = "downloads",
+): Promise<HfModel[]> {
   if (!hasTauri()) return [];
-  return invoke<HfModel[]>("hf_search_models", { query });
+  return invoke<HfModel[]>("hf_search_models", { query, sort });
 }
 
 /** List the `.gguf` files in a repo. Accepts `owner/name` or a pasted HF URL. */
@@ -1428,6 +1467,23 @@ export type MemoryUsage = {
    * `/metrics`. null for external runtimes or before any generation.
    */
   lastTokensPerSec?: number | null;
+  /**
+   * Bytes of KV cache each token of context costs for the loaded model. The
+   * cache scales linearly with the window, so this prices any size the user
+   * picks. null when no model is loaded.
+   */
+  kvBytesPerToken?: number | null;
+  /** Largest context the loaded model was trained for. null when unloaded. */
+  nCtxTrain?: number | null;
+  /**
+   * Largest context whose KV cache still fits in this machine's RAM alongside
+   * the weights. Distinct from nCtxTrain — a model's trained window is often
+   * far larger than the hardware can hold, so this is the number that decides
+   * whether a choice is dangerous.
+   */
+  maxFittingCtx?: number | null;
+  /** Whether the runtime currently lets supporting models reason. */
+  reasoning?: boolean | null;
 };
 
 /**
@@ -1442,6 +1498,119 @@ export async function getMemoryUsage(
   return invoke<MemoryUsage>("get_memory_usage", {
     runtimeBaseUrl: runtimeBaseUrl ?? null,
   });
+}
+
+/**
+ * One point-in-time set of hardware readings. Sampled in the host, rendered in
+ * the Context Window modal, discarded — never stored, never sent anywhere.
+ */
+export type HardwareReading = {
+  /** Milliseconds since sampling began. Gaps mean sampling was paused. */
+  atMs: number;
+  /** Whole-machine CPU, 0-100. */
+  cpuPercent: number;
+  /** AKA's share of the machine, 0-100. */
+  appCpuPercent?: number | null;
+  /** The runtime sidecar's share of the machine, 0-100. */
+  runtimeCpuPercent?: number | null;
+  /** Runtime sidecar RSS in MB — moves with the allocated context window. */
+  runtimeMemoryMb?: number | null;
+  /** GPU utilization, 0-100. macOS only; null elsewhere. */
+  gpuPercent?: number | null;
+  /** Unified memory held by the GPU, in MB. macOS only. */
+  gpuMemoryMb?: number | null;
+};
+
+/** Latest reading plus the recent window, for the sparklines. */
+export type HardwareStats = {
+  current: HardwareReading;
+  /** Oldest first. */
+  recent: HardwareReading[];
+};
+
+/**
+ * Read the host's rolling window of hardware readings. A pure read — the host
+ * samples on its own schedule, so polling this cannot disturb the CPU delta.
+ * Returns null before the first sample (no model loaded), which the UI renders
+ * as dashes.
+ */
+export async function getHardwareStats(): Promise<HardwareStats | null> {
+  if (!hasTauri()) return null;
+  return invoke<HardwareStats | null>("get_hardware_stats");
+}
+
+/**
+ * Set the built-in runtime's context window (tokens). Applies from the next
+ * message — the context is built per request, so nothing reloads.
+ *
+ * Deliberately unguarded: the caller is shown the memory cost and decides.
+ */
+export async function setContextSize(ctxSize: number): Promise<void> {
+  if (!hasTauri()) return;
+  return invoke<void>("set_context_size", { ctxSize });
+}
+
+/**
+ * A model's shape, read from its GGUF header without loading it.
+ *
+ * Lets the Context Window panel price a model the moment it is picked, rather
+ * than only after a message has already committed the machine to the
+ * allocation. Reading the header costs microseconds; loading costs gigabytes.
+ */
+export type ModelSpec = {
+  filename: string;
+  sizeBytes: number;
+  /** Bytes of KV cache per token of context. Scales linearly with the window. */
+  kvBytesPerToken: number;
+  /** Largest context the model was trained for. */
+  nCtxTrain: number;
+  /**
+   * Largest context whose KV cache fits this machine alongside the weights.
+   * This, not nCtxTrain, is what decides danger — a trained window is often
+   * several times what the hardware can hold.
+   */
+  maxFittingCtx: number;
+  architecture: string;
+  /**
+   * Whether this model's chat template exposes an `enable_thinking` switch.
+   * Reasoning is a minority feature — the control is shown only where the
+   * model actually offers one.
+   */
+  supportsReasoningToggle: boolean;
+};
+
+/**
+ * Read an Ollama-managed model's shape from its blob store, without going
+ * through Ollama.
+ *
+ * Prices the model exactly as for a built-in one. It does NOT mean the window
+ * can be set: AKA speaks the OpenAI-compatible API to every runtime, and
+ * Ollama's compatibility layer ignores `num_ctx` — verified against a live
+ * server, which loaded at its own default regardless. Ollama's context is set
+ * in Ollama.
+ */
+export async function inspectOllamaModel(
+  model: string,
+): Promise<ModelSpec | null> {
+  if (!hasTauri()) return null;
+  return invoke<ModelSpec | null>("inspect_ollama_model", { model });
+}
+
+/** Read a model's shape without loading it. null when it isn't a local GGUF. */
+export async function inspectModel(
+  filename: string,
+): Promise<ModelSpec | null> {
+  if (!hasTauri()) return null;
+  return invoke<ModelSpec | null>("inspect_model", { filename });
+}
+
+/**
+ * Turn the built-in runtime's reasoning step on or off. Only affects models
+ * whose template carries the switch; others have no reasoning step to suppress.
+ */
+export async function setReasoning(enabled: boolean): Promise<void> {
+  if (!hasTauri()) return;
+  return invoke<void>("set_reasoning", { enabled });
 }
 
 export async function countTokens(messages: ChatMessage[]): Promise<number> {
@@ -1547,6 +1716,30 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 export async function countLines(path: string): Promise<number> {
   if (!hasTauri()) return 0;
   return invoke<number>("count_lines", { path });
+}
+
+export type WalkEntry = {
+  name: string;
+  path: string;
+  /** Path relative to the walked root, always '/'-separated. */
+  relPath: string;
+  kind: "dir" | "file";
+};
+
+export type WalkResult = {
+  entries: WalkEntry[];
+  /** True when a depth/count bound was hit — the index is a prefix, not the tree. */
+  truncated: boolean;
+};
+
+/**
+ * Recursively index a project for the filetree pane's search box. Applies the
+ * same noise filter as `listDir`, so a search hit always corresponds to a row
+ * the unfiltered tree would also show.
+ */
+export async function walkProject(path: string): Promise<WalkResult> {
+  if (!hasTauri()) return { entries: [], truncated: false };
+  return invoke<WalkResult>("walk_project", { path });
 }
 
 // ---------- Interactive shell (Console pane) ----------

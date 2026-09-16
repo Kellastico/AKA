@@ -12,7 +12,7 @@ import { useRuntimeStore, type Toast } from "./use-runtime-store";
 
 // Per-kind chrome. Frosted-glass surfaces: a translucent color tint over a
 // heavy backdrop blur, with a bright edge so the banner still reads distinctly
-// over the omnibox/header rather than blending into it.
+// over the header rather than blending into it.
 //   success = green · danger/error = red · warning = amber · info = neutral.
 const TOAST_STYLES: Record<Toast["kind"], { box: string; icon: string; Glyph: Icon }> = {
   success: {

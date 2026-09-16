@@ -274,6 +274,7 @@ function ThinkingBubble({ since }: { since: number }) {
  */
 function ToolMessage({ message }: { message: Message }) {
   const openDiffForFile = useWorkspaceStore((s) => s.openDiffForFile);
+  const openFileInFiletree = useWorkspaceStore((s) => s.openFileInFiletree);
   if (!message.toolKind) return null;
   const accent = TOOL_ACCENTS[message.toolKind];
   const Icon = TOOL_ICONS[message.toolKind];
@@ -360,12 +361,20 @@ function ToolMessage({ message }: { message: Message }) {
 
   return (
     <div className="flex flex-col items-start gap-0.5">
-      {isDiffable ? (
+      {message.toolPath ? (
         <button
           type="button"
-          onClick={() => openDiffForFile(message.toolPath!)}
+          onClick={() =>
+            isDiffable
+              ? openDiffForFile(message.toolPath!)
+              : openFileInFiletree(message.toolPath!)
+          }
           className="-mx-1.5 rounded-md px-1.5 py-0.5 text-left hover:bg-ink/5 focus:bg-ink/5 focus:outline-none"
-          aria-label={`Open diff for ${message.toolPath}`}
+          aria-label={
+            isDiffable
+              ? `Open diff for ${message.toolPath}`
+              : `Open ${message.toolPath}`
+          }
         >
           {body}
         </button>

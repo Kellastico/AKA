@@ -126,7 +126,7 @@ fn is_valid_gguf(path: &std::path::Path) -> bool {
 
 /// Reject filenames that could escape the models directory. Only a bare
 /// filename is ever accepted — no separators, no parent refs.
-fn safe_filename(filename: &str) -> Result<&str, String> {
+pub fn safe_filename(filename: &str) -> Result<&str, String> {
     let trimmed = filename.trim();
     if trimmed.is_empty()
         || trimmed.contains('/')
@@ -499,13 +499,38 @@ async fn run_download(
 
 const HF_USER_AGENT: &str = concat!("AKA/", env!("CARGO_PKG_VERSION"));
 
-/// A search hit from the HuggingFace model index.
+/// How many repos one search pulls back. The picker's facets are built from
+/// this result set, so it needs to be wide enough for "Created By" and
+/// "Quantizations" to have something to group; 50 keeps the single request
+/// under ~450 KB.
+const HF_SEARCH_LIMIT: &str = "50";
+
+/// A search hit from the HuggingFace model index, carrying everything the
+/// picker's rows and facets render. It all comes out of the one `/api/models`
+/// request — no per-repo follow-up calls, so a search stays a single round trip.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HfModel {
+    /// Full repo id, `owner/name`.
     pub id: String,
+    /// Owner segment — the "Created By" facet and the avatar tile.
+    pub author: String,
+    /// Repo name without the owner.
+    pub name: String,
     pub downloads: u64,
     pub likes: u64,
+    /// HuggingFace task tag, e.g. `text-generation`, `image-text-to-text`.
+    pub pipeline_tag: Option<String>,
+    /// Parameter count from the repo's GGUF header, e.g. 27_320_697_856.
+    pub params: Option<u64>,
+    /// Training context length from the GGUF header.
+    pub context_length: Option<u64>,
+    /// Distinct quant labels (`Q4_K_M`, `UD-IQ2_XXS`, `BF16`…) across the repo's
+    /// downloadable weights, sorted. Drives the "Quantizations" facet.
+    pub quants: Vec<String>,
+    /// How many downloadable weights the repo has — the number of choices
+    /// behind the row's Download button.
+    pub file_count: u32,
 }
 
 /// A single `.gguf` file inside a repo, with its real (LFS) size.
@@ -515,6 +540,9 @@ pub struct HfGgufFile {
     /// Bare filename, e.g. `model-q4_k_m.gguf`.
     pub filename: String,
     pub size_bytes: u64,
+    /// Quantization label parsed from the name, e.g. `Q4_K_M`. `None` for a
+    /// file whose name carries no quant, and for vision projectors.
+    pub quant: Option<String>,
     /// True when this is one shard of a multi-part model (`-00001-of-000NN`).
     /// Such files can't be loaded individually, so the UI disables them.
     pub sharded: bool,
@@ -527,15 +555,32 @@ fn hf_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("client: {e}"))
 }
 
-/// Search HuggingFace for GGUF models matching `query`, ranked by downloads.
-/// Read-only; returns at most 30 hits.
+/// Map the picker's sort choice onto HuggingFace's `sort` parameter. Anything
+/// unrecognised falls back to `downloads`, so the query string is never built
+/// straight from frontend input.
+fn hf_sort_key(requested: Option<&str>) -> &'static str {
+    match requested.unwrap_or("downloads") {
+        "likes" => "likes",
+        "lastModified" => "lastModified",
+        "trendingScore" => "trendingScore",
+        _ => "downloads",
+    }
+}
+
+/// Search HuggingFace for GGUF models matching `query`, ordered by `sort`
+/// (default: downloads). Read-only; returns at most `HF_SEARCH_LIMIT` hits.
 #[tauri::command]
-pub async fn hf_search_models(query: String) -> Result<Vec<HfModel>, String> {
+pub async fn hf_search_models(
+    query: String,
+    sort: Option<String>,
+) -> Result<Vec<HfModel>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
     // `filter=gguf` restricts to repos tagged GGUF — the only format AKA loads.
+    // `expand[]` asks for exactly the fields the rows need; `full=true` would
+    // also drag card data, configs and chat templates we'd only throw away.
     let url = "https://huggingface.co/api/models";
     let client = hf_client()?;
     let resp = client
@@ -543,9 +588,15 @@ pub async fn hf_search_models(query: String) -> Result<Vec<HfModel>, String> {
         .query(&[
             ("search", q),
             ("filter", "gguf"),
-            ("sort", "downloads"),
+            ("sort", hf_sort_key(sort.as_deref())),
             ("direction", "-1"),
-            ("limit", "30"),
+            ("limit", HF_SEARCH_LIMIT),
+            ("expand[]", "downloads"),
+            ("expand[]", "likes"),
+            ("expand[]", "author"),
+            ("expand[]", "pipeline_tag"),
+            ("expand[]", "gguf"),
+            ("expand[]", "siblings"),
         ])
         .send()
         .await
@@ -554,26 +605,157 @@ pub async fn hf_search_models(query: String) -> Result<Vec<HfModel>, String> {
         return Err(format!("HuggingFace search failed: HTTP {}", resp.status()));
     }
 
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        id: String,
-        #[serde(default)]
-        downloads: u64,
-        #[serde(default)]
-        likes: u64,
-    }
-    let raw: Vec<Raw> = resp
+    let raw: Vec<RawHit> = resp
         .json()
         .await
         .map_err(|e| format!("parse search results: {e}"))?;
-    Ok(raw
-        .into_iter()
-        .map(|r| HfModel {
-            id: r.id,
-            downloads: r.downloads,
-            likes: r.likes,
-        })
-        .collect())
+    Ok(raw.into_iter().map(build_hf_model).collect())
+}
+
+/// The slice of a raw `/api/models` hit the picker needs. Kept at module level
+/// (rather than inline in the command) so `build_hf_model` is unit-testable
+/// without a live API response.
+#[derive(serde::Deserialize)]
+struct RawHit {
+    id: String,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    downloads: u64,
+    #[serde(default)]
+    likes: u64,
+    #[serde(default)]
+    pipeline_tag: Option<String>,
+    #[serde(default)]
+    gguf: Option<RawGguf>,
+    #[serde(default)]
+    siblings: Vec<RawSibling>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawGguf {
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawSibling {
+    rfilename: String,
+}
+
+/// Fold one raw search hit into the shape the picker renders, deriving the
+/// quant facet from the repo's file list.
+fn build_hf_model(r: RawHit) -> HfModel {
+    let (author, name) = match r.id.split_once('/') {
+        Some((o, n)) => (o.to_string(), n.to_string()),
+        None => (r.author.clone().unwrap_or_default(), r.id.clone()),
+    };
+
+    // Count and label only the weights the picker will actually offer — the
+    // same top-level, single-file `.gguf` set `hf_list_gguf_files` returns —
+    // so a facet can never promise a quant the file list won't show.
+    let mut quants: Vec<String> = Vec::new();
+    let mut file_count = 0u32;
+    for s in &r.siblings {
+        let filename = &s.rfilename;
+        if filename.contains('/') || !filename.to_ascii_lowercase().ends_with(".gguf") {
+            continue;
+        }
+        if is_sharded(filename) {
+            continue;
+        }
+        file_count += 1;
+        if let Some(q) = quant_label(filename) {
+            if !quants.iter().any(|e| e == &q) {
+                quants.push(q);
+            }
+        }
+    }
+    quants.sort();
+
+    HfModel {
+        id: r.id,
+        author,
+        name,
+        downloads: r.downloads,
+        likes: r.likes,
+        pipeline_tag: r.pipeline_tag,
+        params: r.gguf.as_ref().and_then(|g| g.total),
+        context_length: r.gguf.as_ref().and_then(|g| g.context_length),
+        quants,
+        file_count,
+    }
+}
+
+/// Pull the quantization label out of a GGUF filename — the trailing token
+/// llama.cpp names its weights by (`…-Q4_K_M.gguf` → `Q4_K_M`), including
+/// unsloth's `UD-` dynamic-quant prefix and unquantized float dumps. Returns
+/// `None` when the name carries no recognisable quant.
+fn quant_label(filename: &str) -> Option<String> {
+    let stem = match filename.rfind('.') {
+        Some(i) if filename[i..].eq_ignore_ascii_case(".gguf") => &filename[..i],
+        _ => return None,
+    };
+    // A vision projector ships beside the weights as `mmproj-…-BF16.gguf`. Its
+    // precision describes the projector, not a quant of the model, so reading
+    // one as a quant would put a phantom entry in the facet — and a wildly
+    // wrong size against the model's parameter count.
+    if stem.to_ascii_lowercase().contains("mmproj") {
+        return None;
+    }
+    let parts: Vec<&str> = stem.split('-').collect();
+    // Scan from the end: the quant is the last such token, and names like
+    // `Qwen3-Coder-30B-Q4_K_M` have model-name tokens ahead of it.
+    for i in (0..parts.len()).rev() {
+        if !is_quant_token(parts[i]) {
+            continue;
+        }
+        let q = parts[i].to_ascii_uppercase();
+        // unsloth marks its dynamic quants with a separate `UD-` token.
+        if i > 0 && parts[i - 1].eq_ignore_ascii_case("UD") {
+            return Some(format!("UD-{q}"));
+        }
+        return Some(q);
+    }
+    None
+}
+
+/// Does this dash-separated filename token name a quantization?
+/// Matches the float dumps plus `[I|T]Q<digit>` optionally followed by
+/// `_`-separated alphanumeric groups: `Q8_0`, `Q4_K_M`, `IQ2_XXS`, `Q6_K`,
+/// `TQ1_0`. `I` marks llama.cpp's importance-matrix quants and `T` its ternary
+/// ones — both are real families, not decoration.
+fn is_quant_token(token: &str) -> bool {
+    if !token.is_ascii() {
+        return false;
+    }
+    let t = token.to_ascii_uppercase();
+    if matches!(t.as_str(), "BF16" | "F16" | "F32" | "FP16" | "FP32") {
+        return true;
+    }
+    let rest = t
+        .strip_prefix('I')
+        .or_else(|| t.strip_prefix('T'))
+        .unwrap_or(&t);
+    let mut chars = rest.chars();
+    if chars.next() != Some('Q') {
+        return false;
+    }
+    if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let tail = &rest[2..];
+    if tail.is_empty() {
+        return true;
+    }
+    match tail.strip_prefix('_') {
+        Some(groups) => groups
+            .split('_')
+            .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_alphanumeric())),
+        None => false,
+    }
 }
 
 /// List the `.gguf` files in a HuggingFace repo with their real sizes.
@@ -628,9 +810,11 @@ pub async fn hf_list_gguf_files(repo: String) -> Result<Vec<HfGgufFile>, String>
             }
             let size_bytes = e.lfs.map(|l| l.size).unwrap_or(e.size);
             let sharded = is_sharded(&filename);
+            let quant = quant_label(&filename);
             Some(HfGgufFile {
                 filename,
                 size_bytes,
+                quant,
                 sharded,
             })
         })
@@ -653,7 +837,7 @@ fn is_sharded(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sharded, normalize_repo, safe_filename};
+    use super::{build_hf_model, hf_sort_key, is_sharded, normalize_repo, quant_label, safe_filename};
 
     #[test]
     fn normalizes_bare_and_url_repos() {
@@ -681,6 +865,101 @@ mod tests {
         assert!(normalize_repo("just-owner").is_err());
         assert!(normalize_repo("").is_err());
         assert!(normalize_repo("own er/na me").is_err());
+    }
+
+    #[test]
+    fn reads_quant_labels_from_gguf_names() {
+        assert_eq!(quant_label("Qwen3.8-27B-Q4_K_M.gguf").as_deref(), Some("Q4_K_M"));
+        assert_eq!(quant_label("Qwen3.8-27B-Q8_0.gguf").as_deref(), Some("Q8_0"));
+        assert_eq!(quant_label("Qwen3-Coder-30B-A3B-IQ4_XS.gguf").as_deref(), Some("IQ4_XS"));
+        assert_eq!(quant_label("Qwen3.8-27B-Q6_K.gguf").as_deref(), Some("Q6_K"));
+        // unsloth's dynamic quants carry a separate `UD-` token.
+        assert_eq!(quant_label("Qwen3.8-27B-UD-IQ2_XXS.gguf").as_deref(), Some("UD-IQ2_XXS"));
+        // Ternary quants are a family of their own, not a typo for `Q1_0`.
+        assert_eq!(
+            quant_label("Qwen3-Coder-30B-A3B-Instruct-UD-TQ1_0.gguf").as_deref(),
+            Some("UD-TQ1_0")
+        );
+        assert_eq!(quant_label("Model-TQ2_0.gguf").as_deref(), Some("TQ2_0"));
+        assert_eq!(quant_label("Qwen3.8-27B-BF16.gguf").as_deref(), Some("BF16"));
+        // Lowercase names normalise to the canonical uppercase label.
+        assert_eq!(quant_label("qwen2.5-coder-7b-q4_k_m.gguf").as_deref(), Some("Q4_K_M"));
+    }
+
+    #[test]
+    fn ignores_vision_projectors() {
+        // The projector's precision is not a quant of the model — reading it as
+        // one would put a phantom BF16 in the facet.
+        assert_eq!(quant_label("mmproj-Qwen3.8-27B-BF16.gguf"), None);
+        assert_eq!(quant_label("mmproj-F16.gguf"), None);
+    }
+
+    #[test]
+    fn ignores_names_without_a_quant() {
+        assert_eq!(quant_label("model.gguf"), None);
+        assert_eq!(quant_label("Qwen3-Coder-30B-A3B-Instruct.gguf"), None);
+        // Not a GGUF at all.
+        assert_eq!(quant_label("Qwen3.8-27B-Q4_K_M.safetensors"), None);
+        // `27B` and `A3B` must not be mistaken for quant tokens.
+        assert_eq!(quant_label("Llama-3.3-70B-Instruct.gguf"), None);
+    }
+
+    #[test]
+    fn builds_a_row_from_a_raw_hit() {
+        let raw = serde_json::from_str(
+            r#"{
+                "id": "unsloth/Qwen3.8-27B-GGUF",
+                "author": "unsloth",
+                "downloads": 1234,
+                "likes": 56,
+                "pipeline_tag": "image-text-to-text",
+                "gguf": { "total": 27320697856, "context_length": 262144 },
+                "siblings": [
+                    { "rfilename": ".gitattributes" },
+                    { "rfilename": "README.md" },
+                    { "rfilename": "Qwen3.8-27B-Q4_K_M.gguf" },
+                    { "rfilename": "Qwen3.8-27B-Q8_0.gguf" },
+                    { "rfilename": "Qwen3.8-27B-UD-IQ2_XXS.gguf" },
+                    { "rfilename": "mmproj-Qwen3.8-27B-BF16.gguf" },
+                    { "rfilename": "BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf" },
+                    { "rfilename": "Qwen3.8-27B-BF16-00001-of-00002.gguf" }
+                ]
+            }"#,
+        )
+        .expect("raw hit parses");
+        let m = build_hf_model(raw);
+
+        assert_eq!(m.author, "unsloth");
+        assert_eq!(m.name, "Qwen3.8-27B-GGUF");
+        assert_eq!(m.params, Some(27_320_697_856));
+        assert_eq!(m.context_length, Some(262_144));
+        assert_eq!(m.pipeline_tag.as_deref(), Some("image-text-to-text"));
+        // Nested paths, non-GGUF files and shards are all excluded, so the
+        // facet matches exactly what the file picker will offer. The projector
+        // is a downloadable file but contributes no quant.
+        assert_eq!(m.file_count, 4);
+        assert_eq!(m.quants, vec!["Q4_K_M", "Q8_0", "UD-IQ2_XXS"]);
+    }
+
+    #[test]
+    fn survives_a_hit_missing_every_optional_field() {
+        let raw = serde_json::from_str(r#"{ "id": "someone/bare-repo" }"#).expect("parses");
+        let m = build_hf_model(raw);
+        assert_eq!(m.author, "someone");
+        assert_eq!(m.name, "bare-repo");
+        assert_eq!(m.params, None);
+        assert_eq!(m.file_count, 0);
+        assert!(m.quants.is_empty());
+    }
+
+    #[test]
+    fn clamps_sort_to_the_allowlist() {
+        assert_eq!(hf_sort_key(Some("likes")), "likes");
+        assert_eq!(hf_sort_key(Some("lastModified")), "lastModified");
+        assert_eq!(hf_sort_key(Some("trendingScore")), "trendingScore");
+        assert_eq!(hf_sort_key(None), "downloads");
+        // Never let frontend input reach the query string verbatim.
+        assert_eq!(hf_sort_key(Some("downloads&limit=9999")), "downloads");
     }
 
     #[test]

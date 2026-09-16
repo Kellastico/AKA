@@ -39,6 +39,20 @@ pub struct MemoryUsage {
     /// Decode throughput of the built-in runtime's last generation (tokens/sec),
     /// from `/metrics`. `None` for external runtimes or before any generation.
     pub last_tokens_per_sec: Option<f64>,
+    /// Bytes of KV cache each token of context costs for the loaded model.
+    /// The cache scales linearly with the context window, so this one constant
+    /// prices any window the user might pick. `None` when no model is loaded.
+    pub kv_bytes_per_token: Option<u64>,
+    /// Largest context the loaded model was trained for. Exceeding it is
+    /// allowed but degrades quality. `None` when no model is loaded.
+    pub n_ctx_train: Option<u32>,
+    /// Largest context whose KV cache still fits in this machine's RAM
+    /// alongside the weights. Distinct from `n_ctx_train`: a model's trained
+    /// window is routinely far larger than the hardware can hold, so this is
+    /// the number that decides whether a choice is dangerous.
+    pub max_fitting_ctx: Option<u32>,
+    /// Whether the runtime currently lets supporting models reason.
+    pub reasoning: Option<bool>,
 }
 
 /// Shape of the ÄKÄ sidecar's `/metrics` endpoint (subset we consume).
@@ -48,6 +62,14 @@ struct SidecarMetrics {
     model_mb: f64,
     ctx_size: u32,
     last_tokens_per_sec: f64,
+    #[serde(default)]
+    kv_bytes_per_token: Option<u64>,
+    #[serde(default)]
+    n_ctx_train: Option<u32>,
+    #[serde(default)]
+    max_fitting_ctx: Option<u32>,
+    #[serde(default)]
+    reasoning: Option<bool>,
 }
 
 /// Return AKA's memory picture for the Context Window panel. Always includes the
@@ -70,6 +92,10 @@ pub async fn get_memory_usage(runtime_base_url: Option<String>) -> MemoryUsage {
                 total_mb: app_mb + m.model_mb,
                 ctx_size: Some(m.ctx_size),
                 last_tokens_per_sec: Some(m.last_tokens_per_sec),
+                kv_bytes_per_token: m.kv_bytes_per_token,
+                n_ctx_train: m.n_ctx_train,
+                max_fitting_ctx: m.max_fitting_ctx,
+                reasoning: m.reasoning,
             };
         }
     }
@@ -85,6 +111,10 @@ pub async fn get_memory_usage(runtime_base_url: Option<String>) -> MemoryUsage {
         total_mb: app_mb + model_mb,
         ctx_size: None,
         last_tokens_per_sec: None,
+        kv_bytes_per_token: None,
+        n_ctx_train: None,
+        max_fitting_ctx: None,
+        reasoning: None,
     }
 }
 

@@ -8,7 +8,7 @@ import { useMcpStore } from "./use-mcp-store";
 
 /**
  * Below this window width the pill collapses to icon-only so the top bar's
- * left cluster can't crowd the centered omnibox. In icon-only mode (and ONLY
+ * left cluster stays compact. In icon-only mode (and ONLY
  * then) the name comes back as a hover tooltip — when the label is visible,
  * a tooltip would just repeat it.
  */

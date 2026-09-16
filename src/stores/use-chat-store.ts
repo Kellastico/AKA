@@ -646,6 +646,13 @@ type ChatState = {
   restart: (sessionId?: string) => void;
   /** Roll the working tree back to a specific checkpoint sha for a session. */
   rollbackTo: (sessionId: string, sha: string) => Promise<void>;
+  /**
+   * Record whether a session's project can be checkpointed at all. Written by
+   * the run launcher, and by the History pane on open — history has to know
+   * before a run happens, or its empty state promises checkpoints that a
+   * non-git project will never produce.
+   */
+  setCheckpointsAvailable: (sessionId: string, ok: boolean) => void;
   /** Roll back to the session's most recent "Before run" baseline. */
   rollbackToPrerun: (sessionId?: string) => Promise<void>;
   /** Take an on-demand checkpoint now. Defaults to the active session. */
@@ -2372,6 +2379,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  setCheckpointsAvailable: (sessionId, ok) =>
+    set((st) => ({
+      checkpointsAvailableBySession: {
+        ...st.checkpointsAvailableBySession,
+        [sessionId]: ok,
+      },
+    })),
   rollbackTo: async (sessionId, sha) => {
     const pp = projectPathForSession(sessionId);
     if (!pp) return;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CaretDown, BookOpenText, FileText } from "@phosphor-icons/react";
+import { CaretDown, BookOpenText, FileText, Warning } from "@phosphor-icons/react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Popover } from "../Popover";
 import {
@@ -16,11 +16,36 @@ import {
   useTokenCounterStore,
   type TokenStatus,
 } from "../../stores/use-token-counter-store";
-import { writeTextFile, getMemoryUsage, type MemoryUsage } from "../../lib/tauri/commands";
+import {
+  writeTextFile,
+  getMemoryUsage,
+  getHardwareStats,
+  setContextSize,
+  setReasoning,
+  inspectModel,
+  inspectOllamaModel,
+  type MemoryUsage,
+  type HardwareStats,
+  type ModelSpec,
+} from "../../lib/tauri/commands";
+import { Sparkline } from "./Sparkline";
+import {
+  CONTEXT_STEP,
+  MIN_CONTEXT,
+  estimateContext,
+  formatContextSize,
+  maxContextFor,
+} from "./context-size";
+import { useRuntimeStore as useRuntimeStoreForHardware } from "../../features/01-llm-provider/use-runtime-store";
 
 function formatGB(gb: number) {
   if (gb < 1) return `${(gb * 1024).toFixed(0)} MB`;
   return `${gb.toFixed(2)} GB`;
+}
+
+/** A 0-100 reading, or a dash when the host couldn't read it. */
+function formatPercent(v: number | null | undefined) {
+  return v === null || v === undefined ? "—" : `${Math.round(v)}%`;
 }
 
 function formatTokens(n: number) {
@@ -198,8 +223,31 @@ function StatsPanel({
   compressing: boolean;
   onCompress: () => void;
 }) {
-  void modelId;
   void agent;
+
+  // Price the model that is *selected*, not only one that happens to be
+  // loaded. Picking a model in the chat box doesn't load it — the runtime only
+  // loads on the first message — so without this the panel stays blank through
+  // exactly the window in which someone is deciding what to run.
+  const [spec, setSpec] = useState<ModelSpec | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setSpec(null);
+    // Built-in models are addressed by filename minus the extension; Ollama's
+    // are read from its own blob store. Either way the shape comes from the
+    // model's GGUF header, so the figures shown are the model's real ones.
+    void inspectModel(`${modelId}.gguf`)
+      .then((s) => (s ? s : inspectOllamaModel(modelId)))
+      .then((s) => {
+        if (!cancelled) setSpec(s);
+      })
+      .catch(() => {
+        /* runtime AKA can't see the weights for — leave unknown */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modelId]);
 
   // Poll real memory every 3 s while the panel is mounted (i.e. popover open).
   const [mem, setMem] = useState<MemoryUsage | null>(null);
@@ -216,6 +264,24 @@ function StatsPanel({
       clearInterval(id);
     };
   }, [runtimeBaseUrl]);
+
+  // Hardware readings poll on their own 1 s cadence. This is a pure read of a
+  // window the host fills in the background, so the rate here can't affect the
+  // CPU delta. Null while no model is loaded — every row falls back to a dash.
+  const [hw, setHw] = useState<HardwareStats | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const read = async () => {
+      const result = await getHardwareStats().catch(() => null);
+      if (!cancelled) setHw(result);
+    };
+    void read();
+    const id = setInterval(() => void read(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const totalRamGB = mem ? mem.totalMb / 1024 : null;
   const ramLabel = totalRamGB !== null && totalRamGB > 0
@@ -298,6 +364,75 @@ function StatsPanel({
             />
           </>
         )}
+        {hw?.current.runtimeMemoryMb != null && (
+          <StatRow
+            label="  Runtime"
+            value={formatGB(hw.current.runtimeMemoryMb / 1024)}
+            subtle
+          />
+        )}
+      </div>
+      {mem?.ctxSize != null && mem.ctxSize > 0 ? (
+        <>
+          <div className="-mx-2 h-px bg-white/10" />
+          <ContextSizeControl mem={mem} spec={spec} />
+        </>
+      ) : spec ? (
+        <>
+          <div className="-mx-2 h-px bg-white/10" />
+          <ContextSizeReadOnly spec={spec} />
+        </>
+      ) : null}
+      {/* Both halves must hold: the model's template has the switch, and the
+          runtime serving it can flip it. Only the built-in runtime can, and
+          only its readings carry `reasoning` — so an Ollama model with the
+          same template gets no toggle rather than one that does nothing. */}
+      {spec?.supportsReasoningToggle && mem?.reasoning != null ? (
+        <>
+          <div className="-mx-2 h-px bg-white/10" />
+          <ReasoningControl mem={mem} />
+        </>
+      ) : null}
+      <div className="-mx-2 h-px bg-white/10" />
+      <div className="space-y-1.5 px-3 py-3">
+        <StatRow label="CPU" value={formatPercent(hw?.current.cpuPercent)} />
+        {hw && (
+          <>
+            <StatRow
+              label="  AKA"
+              value={formatPercent(hw.current.appCpuPercent)}
+              subtle
+            />
+            <StatRow
+              label="  Runtime"
+              value={formatPercent(hw.current.runtimeCpuPercent)}
+              subtle
+            />
+            <Sparkline
+              className="text-white/30"
+              points={hw.recent.map((r) => ({
+                atMs: r.atMs,
+                value: r.cpuPercent,
+              }))}
+            />
+          </>
+        )}
+        <StatRow label="GPU" value={formatPercent(hw?.current.gpuPercent)} />
+        {hw?.current.gpuMemoryMb != null && (
+          <StatRow
+            label="  Memory"
+            value={formatGB(hw.current.gpuMemoryMb / 1024)}
+            subtle
+          />
+        )}
+        {hw && hw.current.gpuPercent != null && (
+          <Sparkline
+            className="text-white/30"
+            points={hw.recent
+              .filter((r) => r.gpuPercent != null)
+              .map((r) => ({ atMs: r.atMs, value: r.gpuPercent as number }))}
+          />
+        )}
       </div>
       <div className="-mx-2 h-px bg-white/10" />
       <button
@@ -308,6 +443,252 @@ function StatsPanel({
         <FileText size={14} />
         {compressing ? "Saving…" : "Compress chat to .md"}
       </button>
+    </div>
+  );
+}
+
+/**
+ * Set the runtime's context window, with the memory cost stated plainly.
+ *
+ * The slider's range comes from the model itself — its trained context window,
+ * read from the GGUF metadata by the runtime — rather than a fixed ladder of
+ * sizes, so a 4k model never offers 128k and a 262k model is never capped at
+ * 32k. The memory figure is likewise computed from the model's own
+ * architecture, not estimated.
+ *
+ * Warnings never block the choice: it is the user's machine, and only they
+ * know what they are willing to risk on it.
+ */
+function ContextSizeControl({
+  mem,
+  spec,
+}: {
+  mem: MemoryUsage;
+  /** The selected model's shape, read from its header. Null for external
+   *  runtimes, where no local file exists to inspect. */
+  spec: ModelSpec | null;
+}) {
+  const hardware = useRuntimeStoreForHardware((s) => s.hardware);
+  const current = mem.ctxSize ?? 0;
+  // Prefer the selected model's own figures. Falling back to the loaded
+  // model's would price the wrong model the moment the two differ — which is
+  // every moment between picking a model and sending the first message.
+  const nCtxTrain = spec?.nCtxTrain ?? mem.nCtxTrain;
+  const kvBytesPerToken = spec?.kvBytesPerToken ?? mem.kvBytesPerToken;
+  const modelMb = spec ? spec.sizeBytes / (1024 * 1024) : mem.modelMb;
+  const maxFittingCtx = spec?.maxFittingCtx ?? mem.maxFittingCtx;
+  const max = maxContextFor(nCtxTrain, current);
+
+  // Track the drag locally so the slider stays responsive: the runtime applies
+  // the value on the next message and /metrics won't echo it back for seconds.
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? current;
+
+  useEffect(() => {
+    if (draft !== null && current === draft) setDraft(null);
+  }, [current, draft]);
+
+  const estimate = estimateContext({
+    ctxSize: shown,
+    kvBytesPerToken,
+    modelMb,
+    totalRamGb: hardware?.totalRamGb,
+    maxFittingCtx,
+  });
+
+  const commit = async (size: number) => {
+    setDraft(size);
+    try {
+      await setContextSize(size);
+    } catch (err) {
+      setDraft(null);
+      // Tauri rejects with a plain string, not an Error — an `instanceof`
+      // check alone silently swallows the reason and leaves the user with
+      // "it failed" and nothing to act on.
+      const reason =
+        err instanceof Error ? err.message : String(err ?? "").trim();
+      useRuntimeStore.getState().pushToast({
+        kind: "error",
+        text: reason
+          ? `Couldn't set context size — ${reason}`
+          : "Couldn't set context size (no reason given by the runtime).",
+      });
+    }
+  };
+
+  const tone =
+    estimate?.risk === "over"
+      ? "text-red-400"
+      : estimate?.risk === "tight"
+        ? "text-amber-400"
+        : "text-white/45";
+
+  return (
+    <div className="px-3 py-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-white/60">Context size</span>
+        <span className="tabular-nums text-white/90">
+          {shown.toLocaleString()} tokens
+        </span>
+      </div>
+
+      <input
+        type="range"
+        min={MIN_CONTEXT}
+        max={max}
+        step={CONTEXT_STEP}
+        value={Math.min(shown, max)}
+        onChange={(e) => setDraft(Number(e.target.value))}
+        onPointerUp={(e) => void commit(Number(e.currentTarget.value))}
+        onKeyUp={(e) => void commit(Number(e.currentTarget.value))}
+        aria-label="Context size in tokens"
+        style={{
+          // Drives the amber rail-fill in styles.css (.aka-slider track).
+          ["--pct" as string]: `${((Math.min(shown, max) - MIN_CONTEXT) / Math.max(max - MIN_CONTEXT, 1)) * 100}%`,
+        }}
+        className="aka-slider mt-2"
+      />
+
+      <div className="flex justify-between text-[9px] uppercase tracking-wide text-white/35">
+        <span>{formatContextSize(MIN_CONTEXT)}</span>
+        {estimate?.safeMax && estimate.safeMax < max ? (
+          <span className="text-amber-400/70">
+            fits here · {formatContextSize(estimate.safeMax)}
+          </span>
+        ) : null}
+        <span>
+          {nCtxTrain ? "model max" : "current"} · {formatContextSize(max)}
+        </span>
+      </div>
+
+      {estimate && (
+        <p className={["mt-2 text-[11px] leading-relaxed", tone].join(" ")}>
+          {estimate.risk !== "ok" && (
+            <Warning size={11} weight="fill" className="mr-1 inline shrink-0" />
+          )}
+          {estimate.warning ??
+            `About ${estimate.totalGb < 10 ? estimate.totalGb.toFixed(1) : Math.round(estimate.totalGb)} GB with weights — roughly ${Math.round(estimate.ramFraction * 100)}% of this machine's RAM.`}
+        </p>
+      )}
+      <p className="mt-1.5 text-[10px] text-white/30">
+        Applies from your next message.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Turn the model's reasoning step on or off.
+ *
+ * Rendered only for models whose chat template carries an `enable_thinking`
+ * switch — reasoning is a minority feature, and a control that appeared
+ * everywhere would silently do nothing on the models that have no reasoning
+ * step at all.
+ */
+function ReasoningControl({ mem }: { mem: MemoryUsage }) {
+  const current = mem.reasoning ?? true;
+  const [pending, setPending] = useState<boolean | null>(null);
+  const shown = pending ?? current;
+
+  useEffect(() => {
+    if (pending !== null && current === pending) setPending(null);
+  }, [current, pending]);
+
+  const toggle = async () => {
+    const next = !shown;
+    setPending(next);
+    try {
+      await setReasoning(next);
+    } catch (err) {
+      setPending(null);
+      const reason =
+        err instanceof Error ? err.message : String(err ?? "").trim();
+      useRuntimeStore.getState().pushToast({
+        kind: "error",
+        text: reason
+          ? `Couldn't change reasoning — ${reason}`
+          : "Couldn't change reasoning.",
+      });
+    }
+  };
+
+  return (
+    <div className="px-3 py-3">
+      <button
+        onClick={() => void toggle()}
+        role="switch"
+        aria-checked={shown}
+        className="flex w-full items-center justify-between gap-2 text-left"
+      >
+        <span className="text-white/60">Reasoning</span>
+        <span
+          className={[
+            "relative h-4 w-7 shrink-0 rounded-full transition-colors",
+            shown ? "bg-amber-400/80" : "bg-white/15",
+          ].join(" ")}
+        >
+          <span
+            className={[
+              "absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform",
+              shown ? "translate-x-3.5" : "translate-x-0.5",
+            ].join(" ")}
+          />
+        </span>
+      </button>
+      <p className="mt-1.5 text-[10px] leading-relaxed text-white/30">
+        {shown
+          ? "The model thinks before answering — slower, usually better on hard problems."
+          : "The model answers directly, skipping the thinking step."}{" "}
+        Applies from your next message.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * What a context window costs on a runtime AKA cannot set it on.
+ *
+ * Every figure here is read from the model's own GGUF header, so it is as true
+ * as the built-in runtime's. What is missing is the control, and deliberately
+ * so: AKA speaks the OpenAI-compatible API, and Ollama's compatibility layer
+ * ignores `num_ctx` — a request carrying it still loads at the server's own
+ * default. A slider here would move and change nothing, so there isn't one.
+ */
+function ContextSizeReadOnly({ spec }: { spec: ModelSpec }) {
+  const hardware = useRuntimeStoreForHardware((s) => s.hardware);
+  const estimate = estimateContext({
+    ctxSize: spec.maxFittingCtx,
+    kvBytesPerToken: spec.kvBytesPerToken,
+    modelMb: spec.sizeBytes / (1024 * 1024),
+    totalRamGb: hardware?.totalRamGb,
+    maxFittingCtx: spec.maxFittingCtx,
+  });
+
+  return (
+    <div className="px-3 py-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-white/60">Model max context</span>
+        <span className="tabular-nums text-white/90">
+          {spec.nCtxTrain.toLocaleString()} tokens
+        </span>
+      </div>
+      <div className="mt-1 flex items-baseline justify-between gap-2">
+        <span className="text-white/45">Fits this machine</span>
+        <span className="tabular-nums text-white/70">
+          {spec.maxFittingCtx.toLocaleString()} tokens
+        </span>
+      </div>
+      {estimate && spec.maxFittingCtx < spec.nCtxTrain ? (
+        <p className="mt-2 text-[11px] leading-relaxed text-amber-400/80">
+          <Warning size={11} weight="fill" className="mr-1 inline shrink-0" />
+          This model is trained for more context than this machine can hold.
+        </p>
+      ) : null}
+      <p className="mt-1.5 text-[10px] leading-relaxed text-white/30">
+        This runtime&rsquo;s context size is set in the runtime itself — the
+        OpenAI-compatible API AKA talks to it through has no way to change
+        it.
+      </p>
     </div>
   );
 }

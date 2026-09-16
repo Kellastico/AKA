@@ -19,6 +19,7 @@ import { useMessagesStore } from "../../stores/use-messages-store";
 import { usePrefsStore } from "../../stores/use-prefs-store";
 import { findBestModelMatch } from "../../lib/model-match";
 
+/** Where an unconfigured install points before the built-in runtime is up. */
 const DEFAULT_BASE_URL = "http://localhost:11434/v1";
 const HEALTH_INTERVAL_MS = 30_000;
 /**
@@ -266,6 +267,12 @@ type RuntimeState = {
   // `runtime:ready` / `runtime:restarting` / `runtime:failed` events.
   builtinStatus: SidecarStatusValue;
   builtinPort: number | null;
+  /**
+   * True once a runtime has been chosen deliberately — by the user, or by a
+   * project config that carries an endpoint. While false the active runtime is
+   * only a placeholder, and the built-in adopts it as soon as it is ready.
+   */
+  runtimeExplicit: boolean;
   builtinError: string | null;
   hardware: HardwareProfile | null;
 
@@ -401,6 +408,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
 
   builtinStatus: "stopped",
   builtinPort: null,
+  runtimeExplicit: false,
   builtinError: null,
   hardware: null,
   runtimePanelOpen: false,
@@ -412,10 +420,15 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     set({ initialized: true });
 
     // No project open yet — start with a blank in-memory runtime. The
-    // per-project config hydrates as soon as the user opens a project.
+    // per-project config hydrates as soon as the user opens a project, and the
+    // built-in runtime adopts the slot the moment it reports ready (see the
+    // `runtime:ready` listener). Until then this is a placeholder, not a
+    // choice: AKA ships with a working runtime, so a fresh launch must not sit
+    // pointing at an external port the user may never have installed.
     set({
       active: { baseUrl: DEFAULT_BASE_URL, apiKey: null },
       selectedModelId: null,
+      runtimeExplicit: false,
     });
 
     // Restore the persisted runtimes (custom endpoints + previously-used
@@ -550,6 +563,13 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
         builtinPort: typeof e.payload === "number" ? e.payload : get().builtinPort,
         builtinError: null,
       });
+      // Nothing has been chosen, so the active slot still holds the startup
+      // placeholder. Take it: the built-in is up and usable, and leaving the
+      // app pointed at an endpoint that isn't running is what makes a fresh
+      // install look broken on first launch.
+      if (!get().runtimeExplicit) {
+        void get().selectBuiltin();
+      }
     });
     await listen("runtime:restarting", () => {
       set({ builtinStatus: "restarting", builtinError: null });
@@ -583,7 +603,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     }
     const baseUrl = builtinEndpoint(port);
     const cfg: RuntimeConfig = { baseUrl, apiKey: null };
-    set({ active: cfg, healthy: get().builtinStatus === "ready" });
+    set({ active: cfg, healthy: get().builtinStatus === "ready", runtimeExplicit: true });
     await useProjectConfigStore.getState().setRuntimeBaseUrl(baseUrl);
     await useProjectConfigStore.getState().setRuntimeApiKey(null);
     if (get().builtinStatus === "ready") {
@@ -609,7 +629,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
 
   selectDetected: async (runtime) => {
     const cfg: RuntimeConfig = { baseUrl: runtime.baseUrl, apiKey: null };
-    set({ active: cfg, healthy: runtime.healthy });
+    set({ active: cfg, healthy: runtime.healthy, runtimeExplicit: true });
     // Connecting to a detected runtime makes it "used" — remember it so it stays
     // in the permanent list even if a later probe doesn't surface it.
     rememberRuntime(set, get, {
@@ -668,7 +688,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     const cfg: RuntimeConfig = { baseUrl: trimmed, apiKey: apiKey || null };
-    set({ active: cfg, healthy: true });
+    set({ active: cfg, healthy: true, runtimeExplicit: true });
     // A validated custom endpoint joins the permanent list (local detection can
     // never find a remote endpoint like OpenRouter, so this is the only way it
     // persists).
@@ -720,7 +740,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
     // effect right away (and the project config stays in sync).
     if (get().active?.baseUrl === oldBaseUrl) {
       const cfg: RuntimeConfig = { baseUrl: trimmed, apiKey: apiKey || null };
-      set({ active: cfg, healthy: true });
+      set({ active: cfg, healthy: true, runtimeExplicit: true });
       await useProjectConfigStore.getState().setRuntimeBaseUrl(trimmed);
       await useProjectConfigStore.getState().setRuntimeApiKey(apiKey || null);
       await refreshModels(set, get, cfg);
@@ -759,8 +779,13 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
         set({ selectedModelId: null });
         return;
       }
+      // A project that names an endpoint has made a real choice; one that
+      // doesn't falls back to the built-in when it's up, not to an external
+      // port that may not exist on this machine.
+      const builtinFallback =
+        get().builtinPort != null ? builtinEndpoint(get().builtinPort!) : DEFAULT_BASE_URL;
       const active: RuntimeConfig = {
-        baseUrl: cfg.baseUrl || DEFAULT_BASE_URL,
+        baseUrl: cfg.baseUrl || builtinFallback,
         apiKey: cfg.apiKey,
       };
       // Only overwrite selectedModelId when the project config actually has
@@ -773,6 +798,7 @@ export const useRuntimeStore = create<RuntimeState>((set, get) => ({
       set({
         active,
         selectedModelId: incomingModel ?? currentModel,
+        runtimeExplicit: !!cfg.baseUrl,
       });
       // Seed the permanent list from the project's configured runtime so a
       // custom endpoint (e.g. OpenRouter) surfaces under "Saved runtimes" even

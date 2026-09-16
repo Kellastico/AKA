@@ -4,7 +4,7 @@ import { useAskUserStore } from "../stores/use-ask-user-store";
 
 /**
  * Bottom-sheet question prompt. Slides up from the bottom of the screen —
- * the opposite direction of the searchbox dropdown ([[Omnibox]] / FileFinder
+ * the opposite direction of the searchbox dropdown (the filetree pane's search / FileFinder
  * use `animate-slide-down-in`). Mounted once in [[AppShell]] and driven by
  * the promise-based API in [[use-ask-user-store]].
  */

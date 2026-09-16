@@ -30,8 +30,16 @@ pub struct LoadedModel {
     pub filename: String,
     /// The loaded weights.
     pub model: LlamaModel,
-    /// Context window (tokens) to allocate per request — from `--ctx-size`.
-    pub ctx_size: u32,
+    /// Largest context this model was trained for. Going beyond it is allowed
+    /// but degrades quality, so the UI warns rather than clamps.
+    pub n_ctx_train: u32,
+    /// Bytes of KV cache per token of context, for this model's architecture.
+    ///
+    /// The cache holds a key and a value vector per layer per token:
+    /// `2 * n_layer * head_dim * n_head_kv * sizeof(f16)`. It scales exactly
+    /// linearly with the context size, so this one constant lets the UI price
+    /// any context window without re-deriving the architecture.
+    pub kv_bytes_per_token: u64,
     /// On-disk size of the `.gguf` in bytes — a close proxy for the in-RAM
     /// weight footprint, surfaced via `/metrics`.
     pub size_bytes: u64,
@@ -46,7 +54,6 @@ pub fn load_model(
     path: &std::path::Path,
     filename: String,
     gpu_layers: u32,
-    ctx_size: u32,
 ) -> Result<LoadedModel, String> {
     use llama_cpp_2::model::params::LlamaModelParams;
 
@@ -55,10 +62,19 @@ pub fn load_model(
         .map_err(|e| format!("Failed to load model: {e}"))?;
     let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
+    // Grouped-query attention means the KV heads can be fewer than the
+    // attention heads, so the cache is sized on `n_head_kv`, not `n_head`.
+    let head_dim = (model.n_embd() as u64) / (model.n_head() as u64).max(1);
+    const KV_ELEM_BYTES: u64 = 2; // llama.cpp defaults both K and V to f16
+    let kv_bytes_per_token =
+        2 * model.n_layer() as u64 * head_dim * model.n_head_kv() as u64 * KV_ELEM_BYTES;
+    let n_ctx_train = model.n_ctx_train();
+
     Ok(LoadedModel {
         filename,
         model,
-        ctx_size,
+        n_ctx_train,
+        kv_bytes_per_token,
         size_bytes,
     })
 }
@@ -67,13 +83,49 @@ pub fn load_model(
 /// string the model expects. Prefers the model's embedded chat template; on any
 /// failure (no template baked in, or application error) falls back to ChatML —
 /// the most widely compatible format for coding models.
-pub fn format_prompt(model: &LlamaModel, messages: &[(String, String)]) -> String {
-    match apply_chat_template(model, messages) {
+pub fn format_prompt(model: &LlamaModel, messages: &[(String, String)], reasoning: bool) -> String {
+    let prompt = match apply_chat_template(model, messages) {
         Ok(prompt) => prompt,
         Err(e) => {
             tracing::warn!("chat template failed ({e}); falling back to ChatML");
             chatml_fallback(messages)
         }
+    };
+    if reasoning {
+        prompt
+    } else {
+        suppress_reasoning(prompt)
+    }
+}
+
+/// Close the reasoning block the template just opened, so the model emits an
+/// empty one and answers directly.
+///
+/// Templates that support this expose it as a Jinja variable:
+///
+/// ```jinja
+/// {%- if enable_thinking is defined and enable_thinking is false %}
+///     {{- '<think>\n\n</think>\n\n' }}
+/// {%- else %}
+///     {{- '<think>\n' }}
+/// {%- endif %}
+/// ```
+///
+/// llama.cpp's template API takes messages and `add_ass` only — there is no way
+/// to pass a custom variable through it — so the same result is produced by
+/// completing the opened block. The output is byte-identical to what the
+/// template emits on the `false` branch, which is why this is a faithful
+/// implementation of the switch rather than an approximation of it.
+///
+/// A prompt that doesn't end in an open block is returned untouched: the model
+/// has no reasoning step, and there is nothing to suppress.
+fn suppress_reasoning(prompt: String) -> String {
+    const OPEN: &str = "<think>\n";
+    const CLOSE: &str = "\n</think>\n\n";
+    if prompt.ends_with(OPEN) {
+        format!("{prompt}{CLOSE}")
+    } else {
+        prompt
     }
 }
 
@@ -110,6 +162,13 @@ pub struct GenerateParams {
     pub temperature: f32,
     pub max_tokens: usize,
     pub threads: u32,
+    /// Context window for this generation. Read fresh per request, so a change
+    /// takes effect on the next message without reloading the weights.
+    pub ctx_size: u32,
+    /// Whether the model may reason before answering. Only meaningful for
+    /// models whose chat template has an `enable_thinking` switch; ignored
+    /// for every other model, which has no reasoning step to suppress.
+    pub reasoning: bool,
 }
 
 /// Run one full generation synchronously — call from `spawn_blocking`.
@@ -141,7 +200,7 @@ pub fn generate_blocking(
 
     // Per-request context owning this generation's KV cache.
     let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(loaded.ctx_size))
+        .with_n_ctx(NonZeroU32::new(params.ctx_size))
         .with_n_threads(params.threads as i32)
         .with_n_threads_batch(params.threads as i32);
     let mut ctx = model
@@ -156,10 +215,10 @@ pub fn generate_blocking(
     if n_prompt == 0 {
         return Err("Prompt tokenised to zero tokens".to_string());
     }
-    if n_prompt >= loaded.ctx_size as usize {
+    if n_prompt >= params.ctx_size as usize {
         return Err(format!(
             "Prompt is {n_prompt} tokens but the context window is {}. Reduce prompt length.",
-            loaded.ctx_size
+            params.ctx_size
         ));
     }
 
@@ -213,7 +272,7 @@ pub fn generate_blocking(
         n_generated += 1;
 
         // Stop before overflowing the context window.
-        if n_cur as u32 >= loaded.ctx_size {
+        if n_cur as u32 >= params.ctx_size {
             break;
         }
 
@@ -234,4 +293,49 @@ pub fn generate_blocking(
         0.0
     };
     Ok(tokens_per_sec)
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::suppress_reasoning;
+
+    /// The exact bytes a supporting template emits on each branch:
+    ///
+    /// ```jinja
+    /// {%- if enable_thinking is defined and enable_thinking is false %}
+    ///     {{- '<think>\n\n</think>\n\n' }}
+    /// {%- else %}
+    ///     {{- '<think>\n' }}
+    /// {%- endif %}
+    /// ```
+    const OPENED: &str = "<|im_start|>assistant\n<think>\n";
+    const TEMPLATE_WOULD_EMIT: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+    #[test]
+    fn matches_what_the_template_emits_when_thinking_is_disabled() {
+        // Not an approximation of the switch — the identical string.
+        assert_eq!(suppress_reasoning(OPENED.to_string()), TEMPLATE_WOULD_EMIT);
+    }
+
+    #[test]
+    fn leaves_a_model_without_a_reasoning_step_alone() {
+        // Qwen 2.5-Coder has no `enable_thinking` in its template, so its
+        // prompt never ends with an open block and must pass through intact.
+        let plain = "<|im_start|>assistant\n".to_string();
+        assert_eq!(suppress_reasoning(plain.clone()), plain);
+    }
+
+    #[test]
+    fn never_closes_a_block_that_is_already_closed() {
+        let already = TEMPLATE_WOULD_EMIT.to_string();
+        assert_eq!(suppress_reasoning(already.clone()), already);
+    }
+
+    #[test]
+    fn does_not_touch_think_tags_inside_the_conversation() {
+        // Prior turns carry their own <think>…</think>; only a block left open
+        // at the very end is the generation prompt.
+        let mid = "<|im_start|>assistant\n<think>\nprior\n</think>\n\nanswer".to_string();
+        assert_eq!(suppress_reasoning(mid.clone()), mid);
+    }
 }
